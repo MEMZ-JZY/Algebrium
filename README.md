@@ -1,3 +1,68 @@
+# Algebrium 项目介绍
+ `本项目使用人工智能辅助编码 `
+Algebrium 是一个面向数学学习与科学计算的本地化、可验证数学智能体平台。项目结合大语言模型、计算机代数系统和交互式图形技术，为用户提供连续对话、数学推导、符号计算、步骤验证以及二维、三维和解析几何可视化能力。
+
+## 核心特点
+
+- 支持 DeepSeek、Kimi、Xiaomi MiMo、火山引擎、OpenRouter、硅基流动等 OpenAI 兼容模型服务。
+- 使用 SageMath 执行积分、求导、方程求解、极限、化简、级数、矩阵和因式分解等数学运算。
+- 对数学推导步骤进行符号验证，降低模型计算错误。
+- 支持 Markdown 与 LaTeX 公式渲染。
+- 支持可交互的二维函数图像、带 X-Y-Z 三轴的三维曲面图，以及平面几何图形。
+- 支持流式输出、连续对话、历史会话保存、会话删除和文件上传。
+- 通过 TheoryTree 记录题目、推导步骤、验证状态、CAS 证据和关联图形。
+- 通过工具白名单和安全表达式校验限制文件、终端、Git 和任意网络操作。
+- 支持网页端、Tauri 桌面端和命令行前端。
+
+## 项目架构
+
+- `packages/desktop`：React、Vite 与 Tauri 2 前端。
+- `packages/opencode`：OpenCode 衍生后端及 Algebrium 数学智能体服务。
+- `docker/sagemath`：SageMath CAS 沙箱与 Kernel Gateway。
+- `docker/qdrant`：可选的向量数据库服务。
+- `packages/curator`：知识库内容采集与索引工具。
+- `scripts`：Windows PowerShell 启动、验证和发布脚本。
+- `config.json`：Provider、模型和运行参数配置。
+
+## 项目状态
+
+Algebrium 当前处于开发原型阶段，默认仅监听 `127.0.0.1`，适合本地开发、研究和人工验收，不建议直接部署到公网或用于多用户生产环境。
+
+项目自有代码采用 Apache-2.0 许可证。项目包含源自 OpenCode 的修改组件，其原有 MIT 许可证和版权声明保留在 `packages/opencode/LICENSE` 中。第三方组件遵循各自许可证。
+
+---
+
+# Algebrium Project Introduction
+
+Algebrium is a local, verifiable mathematics-agent platform for mathematical learning and scientific computing. It combines large language models, computer algebra systems, and interactive visualization technologies to provide conversational problem solving, mathematical derivations, symbolic computation, step verification, and interactive graphics.
+
+## Key Features
+
+- Supports OpenAI-compatible providers such as DeepSeek, Kimi, Xiaomi MiMo, Volcengine, OpenRouter, and SiliconFlow.
+- Uses SageMath for integration, differentiation, equation solving, limits, simplification, series expansion, matrix operations, and factorization.
+- Verifies mathematical derivation steps symbolically to reduce model-generated calculation errors.
+- Renders Markdown and LaTeX mathematical expressions.
+- Provides interactive 2D function plots, 3D surfaces with X-Y-Z axes, and plane-geometry visualizations.
+- Supports streaming responses, multi-turn conversations, saved sessions, session deletion, and file uploads.
+- Uses TheoryTree to record problems, derivation steps, verification states, CAS evidence, and related artifacts.
+- Applies tool allowlists and safe-expression validation to restrict file access, shell commands, Git operations, and arbitrary network requests.
+- Provides web, Tauri desktop, and command-line frontends.
+
+## Architecture
+
+- `packages/desktop`: React, Vite, and Tauri 2 frontend.
+- `packages/opencode`: OpenCode-derived backend and Algebrium mathematics-agent services.
+- `docker/sagemath`: SageMath CAS sandbox and Kernel Gateway.
+- `docker/qdrant`: Optional vector database service.
+- `packages/curator`: Knowledge-base collection and indexing utilities.
+- `scripts`: Windows PowerShell startup, validation, and release scripts.
+- `config.json`: Provider, model, and runtime configuration.
+
+## Project Status
+
+Algebrium is currently an active development prototype. It binds to `127.0.0.1` by default and is intended for local development, research, and manual acceptance testing. It should not be exposed directly to the public Internet or used as a production multi-user service without additional hardening.
+
+Algebrium-owned code is licensed under Apache-2.0. The project includes modified components derived from OpenCode; the original MIT license and copyright notices are preserved in `packages/opencode/LICENSE`. Third-party components remain subject to their respective licenses.
 # Algebrium 使用说明
 
 Algebrium 是一个 Windows 优先的本地数学智能体。它将 React 网页/桌面界面、OpenCode 衍生的 HTTP/SSE 后端、Docker 中隔离运行的 SageMath，以及可选的大模型 Provider 组合在一起。它可进行受限 CAS 计算、符号步骤验证，以及二维、三维和解析几何图形渲染。
