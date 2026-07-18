@@ -1,0 +1,818 @@
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+index 6d4406e88..47877792f 100644
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -212,7 +212,7 @@ comptime {
+         @export(&c.terminal_selection_format_buf, .{ .name = "ghostty_terminal_selection_format_buf" });
+         @export(&c.terminal_selection_format_alloc, .{ .name = "ghostty_terminal_selection_format_alloc" });
+         @export(&c.render_state_new, .{ .name = "ghostty_render_state_new" });
+-        @export(&c.render_state_update, .{ .name = "ghostty_render_state_update" });
++        @export(&c.render_state_update, .{ .name = "ghostty_core_render_state_update" });
+         @export(&c.render_state_get, .{ .name = "ghostty_render_state_get" });
+         @export(&c.render_state_get_multi, .{ .name = "ghostty_render_state_get_multi" });
+         @export(&c.render_state_set, .{ .name = "ghostty_render_state_set" });
+@@ -230,10 +230,39 @@ comptime {
+         @export(&c.render_state_row_cells_get_multi, .{ .name = "ghostty_render_state_row_cells_get_multi" });
+         @export(&c.render_state_row_cells_free, .{ .name = "ghostty_render_state_row_cells_free" });
+         @export(&c.render_state_free, .{ .name = "ghostty_render_state_free" });
+-        @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
+-        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
++        @export(&c.web.new, .{ .name = "ghostty_terminal_new" });
++        @export(&c.web.newWithConfig, .{ .name = "ghostty_terminal_new_with_config" });
++        @export(&c.web.free, .{ .name = "ghostty_terminal_free" });
++        @export(&c.web.resize, .{ .name = "ghostty_terminal_resize" });
++        @export(&c.web.write, .{ .name = "ghostty_terminal_write" });
++        @export(&c.web.renderStateUpdate, .{ .name = "ghostty_render_state_update" });
++        @export(&c.web.renderStateGetCols, .{ .name = "ghostty_render_state_get_cols" });
++        @export(&c.web.renderStateGetRows, .{ .name = "ghostty_render_state_get_rows" });
++        @export(&c.web.renderStateGetCursorX, .{ .name = "ghostty_render_state_get_cursor_x" });
++        @export(&c.web.renderStateGetCursorY, .{ .name = "ghostty_render_state_get_cursor_y" });
++        @export(&c.web.renderStateGetCursorVisible, .{ .name = "ghostty_render_state_get_cursor_visible" });
++        @export(&c.web.renderStateGetBgColor, .{ .name = "ghostty_render_state_get_bg_color" });
++        @export(&c.web.renderStateGetFgColor, .{ .name = "ghostty_render_state_get_fg_color" });
++        @export(&c.web.renderStateIsRowDirty, .{ .name = "ghostty_render_state_is_row_dirty" });
++        @export(&c.web.renderStateMarkClean, .{ .name = "ghostty_render_state_mark_clean" });
++        @export(&c.web.renderStateGetViewport, .{ .name = "ghostty_render_state_get_viewport" });
++        @export(&c.web.renderStateGetGrapheme, .{ .name = "ghostty_render_state_get_grapheme" });
++        @export(&c.web.isAlternateScreen, .{ .name = "ghostty_terminal_is_alternate_screen" });
++        @export(&c.web.hasMouseTracking, .{ .name = "ghostty_terminal_has_mouse_tracking" });
++        @export(&c.web.getMode, .{ .name = "ghostty_terminal_get_mode" });
++        @export(&c.web.getScrollbackLength, .{ .name = "ghostty_terminal_get_scrollback_length" });
++        @export(&c.web.getScrollbackLine, .{ .name = "ghostty_terminal_get_scrollback_line" });
++        @export(&c.web.getScrollbackGrapheme, .{ .name = "ghostty_terminal_get_scrollback_grapheme" });
++        @export(&c.web.isRowWrapped, .{ .name = "ghostty_terminal_is_row_wrapped" });
++        @export(&c.web.getHyperlinkUri, .{ .name = "ghostty_terminal_get_hyperlink_uri" });
++        @export(&c.web.getScrollbackHyperlinkUri, .{ .name = "ghostty_terminal_get_scrollback_hyperlink_uri" });
++        @export(&c.web.hasResponse, .{ .name = "ghostty_terminal_has_response" });
++        @export(&c.web.readResponse, .{ .name = "ghostty_terminal_read_response" });
++
++        @export(&c.terminal_new, .{ .name = "ghostty_core_terminal_new" });
++        @export(&c.terminal_free, .{ .name = "ghostty_core_terminal_free" });
+         @export(&c.terminal_reset, .{ .name = "ghostty_terminal_reset" });
+-        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
++        @export(&c.terminal_resize, .{ .name = "ghostty_core_terminal_resize" });
+         @export(&c.terminal_set, .{ .name = "ghostty_terminal_set" });
+         @export(&c.terminal_vt_write, .{ .name = "ghostty_terminal_vt_write" });
+         @export(&c.terminal_scroll_viewport, .{ .name = "ghostty_terminal_scroll_viewport" });
+diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
+index 648bdbe51..1a81f26bc 100644
+--- a/src/terminal/c/main.zig
++++ b/src/terminal/c/main.zig
+@@ -43,6 +43,7 @@ pub const size_report = @import("size_report.zig");
+ pub const style = @import("style.zig");
+ pub const sys = @import("sys.zig");
+ pub const terminal = @import("terminal.zig");
++pub const web = @import("web.zig");
+ 
+ // The full C API, unexported.
+ pub const build_info = buildpkg.get;
+diff --git a/src/terminal/c/web.zig b/src/terminal/c/web.zig
+new file mode 100644
+index 000000000..65f90ce04
+--- /dev/null
++++ b/src/terminal/c/web.zig
+@@ -0,0 +1,744 @@
++//! ghostty-web compatibility API for libghostty-vt.
++
++const std = @import("std");
++const Allocator = std.mem.Allocator;
++const builtin = @import("builtin");
++const lib = @import("../lib.zig");
++const terminal_c = @import("terminal.zig");
++const Terminal = terminal_c.ZigTerminal;
++const render = @import("../render.zig");
++const RenderState = render.RenderState;
++const color = @import("../color.zig");
++const modespkg = @import("../modes.zig");
++const pagepkg = @import("../page.zig");
++const Page = pagepkg.Page;
++const Style = @import("../style.zig").Style;
++
++const TerminalWrapper = struct {
++    alloc: Allocator,
++    terminal: terminal_c.Terminal,
++    render_state: RenderState = .empty,
++    response_buffer: std.ArrayList(u8) = .empty,
++    last_screen_is_alternate: bool = false,
++};
++
++fn zigTerminal(wrapper: anytype) *Terminal {
++    return terminal_c.zigTerminal(wrapper.terminal).?;
++}
++
++fn responseCallback(_: terminal_c.Terminal, userdata: ?*anyopaque, data: [*]const u8, len: usize) callconv(lib.calling_conv) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(userdata orelse return));
++    wrapper.response_buffer.appendSlice(wrapper.alloc, data[0..len]) catch {};
++}
++
++/// C-compatible cell structure (16 bytes)
++pub const GhosttyCell = extern struct {
++    codepoint: u32,
++    fg_r: u8,
++    fg_g: u8,
++    fg_b: u8,
++    bg_r: u8,
++    bg_g: u8,
++    bg_b: u8,
++    flags: u8,
++    width: u8,
++    hyperlink_id: u16,
++    grapheme_len: u8 = 0, // Number of extra codepoints beyond first
++    _pad: u8 = 0,
++};
++
++/// Dirty state
++pub const GhosttyDirty = enum(u8) {
++    none = 0,
++    partial = 1,
++    full = 2,
++};
++
++/// C-compatible terminal configuration
++pub const GhosttyTerminalConfig = extern struct {
++    scrollback_limit: u32,
++    fg_color: u32,
++    bg_color: u32,
++    cursor_color: u32,
++    palette: [16]u32,
++};
++
++// ============================================================================
++// Lifecycle
++// ============================================================================
++
++pub fn new(cols: c_int, rows: c_int) callconv(.c) ?*anyopaque {
++    return newWithConfig(cols, rows, null);
++}
++
++pub fn newWithConfig(cols: c_int, rows: c_int, config: ?*const GhosttyTerminalConfig) callconv(.c) ?*anyopaque {
++    if (cols <= 0 or rows <= 0) return null;
++    const alloc = if (builtin.target.cpu.arch.isWasm()) std.heap.wasm_allocator else std.heap.c_allocator;
++    const wrapper = alloc.create(TerminalWrapper) catch return null;
++    wrapper.* = .{ .alloc = alloc, .terminal = null };
++
++    const scrollback_lines: usize = if (config) |cfg|
++        if (cfg.scrollback_limit == 0) std.math.maxInt(usize) else cfg.scrollback_limit
++    else
++        10_000;
++    const max_scrollback: usize = if (scrollback_lines == std.math.maxInt(usize))
++        std.math.maxInt(usize)
++    else blk: {
++        const capacity = pagepkg.std_capacity.adjust(.{ .cols = @intCast(cols) }) catch
++            break :blk scrollback_lines * 1024;
++        const page_size = Page.layout(capacity).total_size;
++        break :blk scrollback_lines * (page_size / capacity.rows);
++    };
++    if (terminal_c.new(null, &wrapper.terminal, .{
++        .cols = @intCast(cols),
++        .rows = @intCast(rows),
++        .max_scrollback = max_scrollback,
++    }) != .success) {
++        alloc.destroy(wrapper);
++        return null;
++    }
++
++    const t = zigTerminal(wrapper);
++    if (config) |cfg| {
++        if (cfg.fg_color != 0) t.colors.foreground = color.DynamicRGB.init(colorFromInt(cfg.fg_color));
++        if (cfg.bg_color != 0) t.colors.background = color.DynamicRGB.init(colorFromInt(cfg.bg_color));
++        if (cfg.cursor_color != 0) t.colors.cursor = color.DynamicRGB.init(colorFromInt(cfg.cursor_color));
++        for (cfg.palette, 0..) |value, i| {
++            if (value != 0) t.colors.palette.current[i] = colorFromInt(value);
++        }
++    }
++    t.modes.set(.linefeed, false);
++    t.modes.set(.grapheme_cluster, true);
++
++    _ = terminal_c.set(wrapper.terminal, .userdata, wrapper);
++    _ = terminal_c.set(wrapper.terminal, .write_pty, @ptrCast(&responseCallback));
++    return @ptrCast(wrapper);
++}
++
++fn colorFromInt(value: u32) color.RGB {
++    return .{
++        .r = @truncate((value >> 16) & 0xff),
++        .g = @truncate((value >> 8) & 0xff),
++        .b = @truncate(value & 0xff),
++    };
++}
++
++pub fn free(ptr: ?*anyopaque) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    const alloc = wrapper.alloc;
++    wrapper.response_buffer.deinit(alloc);
++    wrapper.render_state.deinit(alloc);
++    terminal_c.free(wrapper.terminal);
++    alloc.destroy(wrapper);
++}
++
++pub fn resize(ptr: ?*anyopaque, cols: c_int, rows: c_int) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    if (cols <= 0 or rows <= 0) return;
++    _ = terminal_c.resize(wrapper.terminal, @intCast(cols), @intCast(rows), 0, 0);
++}
++
++pub fn write(ptr: ?*anyopaque, data: [*]const u8, len: usize) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    terminal_c.vt_write(wrapper.terminal, data, len);
++}
++
++// ============================================================================
++// RenderState API - High-performance rendering
++// ============================================================================
++
++/// Update render state from terminal. Call once per frame.
++/// Returns dirty state: 0=none, 1=partial, 2=full
++pub fn renderStateUpdate(ptr: ?*anyopaque) callconv(.c) GhosttyDirty {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return .full));
++
++    // Detect screen buffer switch (normal <-> alternate)
++    const current_is_alternate = zigTerminal(wrapper).screens.active_key == .alternate;
++    const screen_switched = current_is_alternate != wrapper.last_screen_is_alternate;
++    wrapper.last_screen_is_alternate = current_is_alternate;
++
++    // When screen switches, we must fully reset the render state to avoid
++    // stale cached cell data from the previous screen buffer.
++    if (screen_switched) {
++        wrapper.render_state.deinit(wrapper.alloc);
++        wrapper.render_state = RenderState.empty;
++    }
++
++    wrapper.render_state.update(wrapper.alloc, zigTerminal(wrapper)) catch return .full;
++
++    // If screen switched, always return full dirty to force complete redraw
++    if (screen_switched) {
++        return .full;
++    }
++
++    return switch (wrapper.render_state.dirty) {
++        .false => .none,
++        .partial => .partial,
++        .full => .full,
++    };
++}
++
++/// Get dimensions from render state
++pub fn renderStateGetCols(ptr: ?*anyopaque) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return @intCast(wrapper.render_state.cols);
++}
++
++pub fn renderStateGetRows(ptr: ?*anyopaque) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return @intCast(wrapper.render_state.rows);
++}
++
++/// Get cursor X position
++pub fn renderStateGetCursorX(ptr: ?*anyopaque) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return @intCast(wrapper.render_state.cursor.active.x);
++}
++
++/// Get cursor Y position
++pub fn renderStateGetCursorY(ptr: ?*anyopaque) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    return @intCast(wrapper.render_state.cursor.active.y);
++}
++
++/// Check if cursor is visible
++pub fn renderStateGetCursorVisible(ptr: ?*anyopaque) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return wrapper.render_state.cursor.visible;
++}
++
++/// Get default background color as 0xRRGGBB
++pub fn renderStateGetBgColor(ptr: ?*anyopaque) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    const bg = wrapper.render_state.colors.background;
++    return (@as(u32, bg.r) << 16) | (@as(u32, bg.g) << 8) | bg.b;
++}
++
++/// Get default foreground color as 0xRRGGBB
++pub fn renderStateGetFgColor(ptr: ?*anyopaque) callconv(.c) u32 {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0xCCCCCC));
++    const fg = wrapper.render_state.colors.foreground;
++    return (@as(u32, fg.r) << 16) | (@as(u32, fg.g) << 8) | fg.b;
++}
++
++/// Check if row is dirty
++pub fn renderStateIsRowDirty(ptr: ?*anyopaque, y: c_int) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return true));
++    if (wrapper.render_state.dirty == .full) return true;
++    if (wrapper.render_state.dirty == .false) return false;
++    const y_usize: usize = @intCast(y);
++    if (y_usize >= wrapper.render_state.row_data.len) return false;
++    return wrapper.render_state.row_data.items(.dirty)[y_usize];
++}
++
++/// Mark render state as clean after rendering
++pub fn renderStateMarkClean(ptr: ?*anyopaque) callconv(.c) void {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return));
++    wrapper.render_state.dirty = .false;
++    @memset(wrapper.render_state.row_data.items(.dirty), false);
++}
++
++/// Get ALL viewport cells in one call - reads directly from terminal screen buffer.
++/// Uses the cached row pins from RenderState (built during update()) to read
++/// cell data. This matches the native renderer which uses the same cached pins
++/// rather than re-iterating the page list.
++/// Returns total cells written (rows * cols), or -1 on error.
++pub fn renderStateGetViewport(
++    ptr: ?*anyopaque,
++    out: [*]GhosttyCell,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const rs = &wrapper.render_state;
++    const rows = rs.rows;
++    const cols = rs.cols;
++    const total: usize = @as(usize, rows) * cols;
++
++    if (buf_size < total) return -1;
++
++    const default_cell: GhosttyCell = .{
++        .codepoint = 0,
++        .fg_r = rs.colors.foreground.r,
++        .fg_g = rs.colors.foreground.g,
++        .fg_b = rs.colors.foreground.b,
++        .bg_r = rs.colors.background.r,
++        .bg_g = rs.colors.background.g,
++        .bg_b = rs.colors.background.b,
++        .flags = 0,
++        .width = 1,
++        .hyperlink_id = 0,
++    };
++
++    // Use the cached row pins from RenderState, built during update().
++    // The native renderer also reads from these cached pins rather than
++    // re-iterating the page list, which avoids any inconsistency from
++    // independent top-left resolution across page boundaries.
++    const row_pins = rs.row_data.items(.pin);
++
++    var idx: usize = 0;
++    for (0..rows) |y| {
++        if (y >= row_pins.len) {
++            // Row not in cache — fill with defaults
++            for (0..cols) |_| {
++                out[idx] = default_cell;
++                idx += 1;
++            }
++            continue;
++        }
++
++        const row_pin = row_pins[y];
++        const row_cells = row_pin.cells(.all);
++        const page = &row_pin.node.data;
++
++        for (0..cols) |x| {
++            if (x >= row_cells.len) {
++                out[idx] = default_cell;
++                idx += 1;
++                continue;
++            }
++
++            const cell = &row_cells[x];
++
++            // Get style from page styles (cell has style_id)
++            const sty: Style = if (cell.style_id > 0)
++                page.styles.get(page.memory, cell.style_id).*
++            else
++                .{};
++
++            // Resolve colors
++            const fg: color.RGB = switch (sty.fg_color) {
++                .none => rs.colors.foreground,
++                .palette => |i| rs.colors.palette[i],
++                .rgb => |rgb| rgb,
++            };
++            const bg: color.RGB = if (sty.bg(cell, &rs.colors.palette)) |rgb| rgb else rs.colors.background;
++
++            // Build flags
++            var flags: u8 = 0;
++            if (sty.flags.bold) flags |= 1 << 0;
++            if (sty.flags.italic) flags |= 1 << 1;
++            if (sty.flags.underline != .none) flags |= 1 << 2;
++            if (sty.flags.strikethrough) flags |= 1 << 3;
++            if (sty.flags.inverse) flags |= 1 << 4;
++            if (sty.flags.invisible) flags |= 1 << 5;
++            if (sty.flags.blink) flags |= 1 << 6;
++            if (sty.flags.faint) flags |= 1 << 7;
++
++            // Get grapheme length if cell has grapheme data
++            const grapheme_len: u8 = if (cell.hasGrapheme())
++                if (page.lookupGrapheme(cell)) |cps| @min(@as(u8, @intCast(cps.len)), 255) else 0
++            else
++                0;
++
++            out[idx] = .{
++                .codepoint = cell.codepoint(),
++                .fg_r = fg.r,
++                .fg_g = fg.g,
++                .fg_b = fg.b,
++                .bg_r = bg.r,
++                .bg_g = bg.g,
++                .bg_b = bg.b,
++                .flags = flags,
++                .width = switch (cell.wide) {
++                    .narrow => 1,
++                    .wide => 2,
++                    .spacer_tail, .spacer_head => 0,
++                },
++                .hyperlink_id = if (cell.hyperlink) 1 else 0,
++                .grapheme_len = grapheme_len,
++            };
++            idx += 1;
++        }
++    }
++
++    return @intCast(total);
++}
++
++/// Get grapheme codepoints for a cell at (row, col).
++/// Returns all codepoints (including the first one) as u32 values.
++/// Returns the number of codepoints written, or -1 on error.
++pub fn renderStateGetGrapheme(
++    ptr: ?*anyopaque,
++    row: c_int,
++    col: c_int,
++    out: [*]u32,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const rs = &wrapper.render_state;
++    const t = zigTerminal(wrapper);
++    const cols: usize = @intCast(rs.cols);
++
++    if (row < 0 or col < 0) return -1;
++    if (@as(usize, @intCast(row)) >= rs.rows) return -1;
++    if (@as(usize, @intCast(col)) >= cols) return -1;
++    if (buf_size < 1) return -1;
++
++    // Get the pin for this row from the terminal's active screen
++    const pages = &t.screens.active.pages;
++    const pin = pages.pin(.{ .active = .{ .y = @intCast(row) } }) orelse return -1;
++
++    const cells = pin.cells(.all);
++    const page = pin.node.data;
++    const x: usize = @intCast(col);
++
++    if (x >= cells.len) return -1;
++
++    const cell = &cells[x];
++
++    // First codepoint is always from the cell
++    out[0] = cell.codepoint();
++    var count: usize = 1;
++
++    // Add extra codepoints from grapheme map if present
++    if (cell.hasGrapheme()) {
++        if (page.lookupGrapheme(cell)) |cps| {
++            for (cps) |cp| {
++                if (count >= buf_size) break;
++                out[count] = cp;
++                count += 1;
++            }
++        }
++    }
++
++    return @intCast(count);
++}
++
++// ============================================================================
++// Terminal Modes (minimal set for compatibility)
++// ============================================================================
++
++pub fn isAlternateScreen(ptr: ?*anyopaque) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return zigTerminal(wrapper).screens.active_key == .alternate;
++}
++
++pub fn hasMouseTracking(ptr: ?*anyopaque) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return zigTerminal(wrapper).modes.get(.mouse_event_normal) or
++        zigTerminal(wrapper).modes.get(.mouse_event_button) or
++        zigTerminal(wrapper).modes.get(.mouse_event_any);
++}
++
++/// Query arbitrary terminal mode by number
++/// Returns true if mode is set, false otherwise
++pub fn getMode(ptr: ?*anyopaque, mode_num: c_int, is_ansi: bool) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    const mode = modespkg.modeFromInt(@intCast(mode_num), is_ansi) orelse return false;
++    return zigTerminal(wrapper).modes.get(mode);
++}
++
++// ============================================================================
++// Scrollback API
++// ============================================================================
++
++/// Get the number of scrollback lines (history, not including active screen)
++pub fn getScrollbackLength(ptr: ?*anyopaque) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
++    const pages = zigTerminal(wrapper).screens.active.pages;
++    // total_rows includes both scrollback and active area
++    // We subtract rows (active area) to get just scrollback
++    if (pages.total_rows <= pages.rows) return 0;
++    return @intCast(pages.total_rows - pages.rows);
++}
++
++/// Get a line from the scrollback buffer
++/// offset 0 = oldest line in scrollback, offset (length-1) = most recent scrollback line
++/// Returns number of cells written, or -1 on error
++pub fn getScrollbackLine(
++    ptr: ?*anyopaque,
++    offset: c_int,
++    out: [*]GhosttyCell,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const rs = &wrapper.render_state;
++    const cols = rs.cols;
++
++    if (buf_size < cols) return -1;
++    if (offset < 0) return -1;
++
++    const scrollback_len = getScrollbackLength(ptr);
++    if (offset >= scrollback_len) return -1;
++
++    // Get the pin for this scrollback row
++    // history point: y=0 is oldest, y=scrollback_len-1 is newest
++    const pages = zigTerminal(wrapper).screens.active.pages;
++    const pin = pages.pin(.{ .history = .{ .y = @intCast(offset) } }) orelse return -1;
++
++    // Get cells for this row
++    const cells = pin.cells(.all);
++    const page = pin.node.data;
++
++    // Fill output buffer
++    for (0..cols) |x| {
++        if (x >= cells.len) {
++            // Fill with default
++            out[x] = .{
++                .codepoint = 0,
++                .fg_r = rs.colors.foreground.r,
++                .fg_g = rs.colors.foreground.g,
++                .fg_b = rs.colors.foreground.b,
++                .bg_r = rs.colors.background.r,
++                .bg_g = rs.colors.background.g,
++                .bg_b = rs.colors.background.b,
++                .flags = 0,
++                .width = 1,
++                .hyperlink_id = 0,
++            };
++            continue;
++        }
++
++        const cell = &cells[x];
++
++        // Get style from page styles (cell has style_id)
++        const sty: Style = if (cell.style_id > 0)
++            page.styles.get(page.memory, cell.style_id).*
++        else
++            .{};
++
++        // Resolve colors
++        const fg: color.RGB = switch (sty.fg_color) {
++            .none => rs.colors.foreground,
++            .palette => |i| rs.colors.palette[i],
++            .rgb => |rgb| rgb,
++        };
++        const bg: color.RGB = if (sty.bg(cell, &rs.colors.palette)) |rgb| rgb else rs.colors.background;
++
++        // Build flags
++        var flags: u8 = 0;
++        if (sty.flags.bold) flags |= 1 << 0;
++        if (sty.flags.italic) flags |= 1 << 1;
++        if (sty.flags.underline != .none) flags |= 1 << 2;
++        if (sty.flags.strikethrough) flags |= 1 << 3;
++        if (sty.flags.inverse) flags |= 1 << 4;
++        if (sty.flags.invisible) flags |= 1 << 5;
++        if (sty.flags.blink) flags |= 1 << 6;
++        if (sty.flags.faint) flags |= 1 << 7;
++
++        // Get grapheme length if cell has grapheme data
++        const grapheme_len: u8 = if (cell.hasGrapheme())
++            if (page.lookupGrapheme(cell)) |cps| @min(@as(u8, @intCast(cps.len)), 255) else 0
++        else
++            0;
++
++        out[x] = .{
++            .codepoint = cell.codepoint(),
++            .fg_r = fg.r,
++            .fg_g = fg.g,
++            .fg_b = fg.b,
++            .bg_r = bg.r,
++            .bg_g = bg.g,
++            .bg_b = bg.b,
++            .flags = flags,
++            .width = switch (cell.wide) {
++                .narrow => 1,
++                .wide => 2,
++                .spacer_tail, .spacer_head => 0,
++            },
++            .hyperlink_id = if (cell.hyperlink) 1 else 0,
++            .grapheme_len = grapheme_len,
++        };
++    }
++    return @intCast(cols);
++}
++
++/// Get grapheme codepoints for a cell in the scrollback buffer.
++/// Returns all codepoints (including the first one) as u32 values.
++/// Returns the number of codepoints written, or -1 on error.
++pub fn getScrollbackGrapheme(
++    ptr: ?*anyopaque,
++    offset: c_int,
++    col: c_int,
++    out: [*]u32,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const rs = &wrapper.render_state;
++    const cols: usize = @intCast(rs.cols);
++
++    if (offset < 0 or col < 0) return -1;
++    if (@as(usize, @intCast(col)) >= cols) return -1;
++    if (buf_size < 1) return -1;
++
++    const scrollback_len = getScrollbackLength(ptr);
++    if (offset >= scrollback_len) return -1;
++
++    // Get the pin for this scrollback row
++    const pages = zigTerminal(wrapper).screens.active.pages;
++    const pin = pages.pin(.{ .history = .{ .y = @intCast(offset) } }) orelse return -1;
++
++    const cells = pin.cells(.all);
++    const page = pin.node.data;
++    const x: usize = @intCast(col);
++
++    if (x >= cells.len) return -1;
++
++    const cell = &cells[x];
++
++    // First codepoint is always from the cell
++    out[0] = cell.codepoint();
++    var count: usize = 1;
++
++    // Add extra codepoints from grapheme map if present
++    if (cell.hasGrapheme()) {
++        if (page.lookupGrapheme(cell)) |cps| {
++            for (cps) |cp| {
++                if (count >= buf_size) break;
++                out[count] = cp;
++                count += 1;
++            }
++        }
++    }
++
++    return @intCast(count);
++}
++
++/// Check if a row is a continuation from the previous row (soft-wrapped)
++/// This matches xterm.js semantics where isWrapped indicates the row continues
++/// from the previous row, not that it wraps to the next row.
++pub fn isRowWrapped(ptr: ?*anyopaque, y: c_int) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    const pages = zigTerminal(wrapper).screens.active.pages;
++
++    // Get pin for this row in active area
++    const pin = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return false;
++    const rac = pin.rowAndCell();
++
++    // wrap_continuation means this row continues from the previous row
++    return rac.row.wrap_continuation;
++}
++
++// ============================================================================
++// Hyperlink API
++// ============================================================================
++
++/// Get the hyperlink URI for a cell in the active viewport.
++/// Returns number of bytes written, 0 if no hyperlink, -1 on error.
++pub fn getHyperlinkUri(
++    ptr: ?*anyopaque,
++    row: c_int,
++    col: c_int,
++    out: [*]u8,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const t = zigTerminal(wrapper);
++
++    if (row < 0 or col < 0) return -1;
++
++    // Get the pin for this row from the terminal's active screen
++    const pages = &t.screens.active.pages;
++    const pin = pages.pin(.{ .active = .{ .y = @intCast(row) } }) orelse return -1;
++
++    const cells = pin.cells(.all);
++    const page = pin.node.data;
++    const x: usize = @intCast(col);
++
++    if (x >= cells.len) return -1;
++
++    const cell = &cells[x];
++
++    // Check if cell has a hyperlink
++    if (!cell.hyperlink) return 0;
++
++    // Look up the hyperlink ID from the page
++    const hyperlink_id = page.lookupHyperlink(cell) orelse return 0;
++
++    // Get the hyperlink entry from the set
++    const hyperlink_entry = page.hyperlink_set.get(page.memory, hyperlink_id);
++
++    // Get the URI bytes from the page memory
++    const uri = hyperlink_entry.uri.slice(page.memory);
++
++    if (uri.len == 0) return 0;
++    if (buf_size < uri.len) return -1;
++
++    @memcpy(out[0..uri.len], uri);
++    return @intCast(uri.len);
++}
++
++/// Get the hyperlink URI for a cell in the scrollback buffer.
++/// @param offset Scrollback line offset (0 = oldest, scrollback_len-1 = newest)
++/// @param col Column index (0-based)
++/// Returns number of bytes written, 0 if no hyperlink, -1 on error.
++pub fn getScrollbackHyperlinkUri(
++    ptr: ?*anyopaque,
++    offset: c_int,
++    col: c_int,
++    out: [*]u8,
++    buf_size: usize,
++) callconv(.c) c_int {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++
++    if (offset < 0 or col < 0) return -1;
++
++    const scrollback_len = getScrollbackLength(ptr);
++    if (offset >= scrollback_len) return -1;
++
++    // Get the pin for this scrollback row
++    const pages = zigTerminal(wrapper).screens.active.pages;
++    const pin = pages.pin(.{ .history = .{ .y = @intCast(offset) } }) orelse return -1;
++
++    const cells = pin.cells(.all);
++    const page = pin.node.data;
++    const x: usize = @intCast(col);
++
++    if (x >= cells.len) return -1;
++
++    const cell = &cells[x];
++
++    // Check if cell has a hyperlink
++    if (!cell.hyperlink) return 0;
++
++    // Look up the hyperlink ID from the page
++    const hyperlink_id = page.lookupHyperlink(cell) orelse return 0;
++
++    // Get the hyperlink entry from the set
++    const hyperlink_entry = page.hyperlink_set.get(page.memory, hyperlink_id);
++
++    // Get the URI bytes from the page memory
++    const uri = hyperlink_entry.uri.slice(page.memory);
++
++    if (uri.len == 0) return 0;
++    if (buf_size < uri.len) return -1;
++
++    @memcpy(out[0..uri.len], uri);
++    return @intCast(uri.len);
++}
++
++// ============================================================================
++// Response API - for DSR and other terminal queries
++// ============================================================================
++
++/// Check if there are pending responses from the terminal
++pub fn hasResponse(ptr: ?*anyopaque) callconv(.c) bool {
++    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
++    return wrapper.response_buffer.items.len > 0;
++}
++
++/// Read pending responses from the terminal.
++/// Returns number of bytes written to buffer, or 0 if no responses pending.
++/// Returns -1 on error (null pointer or buffer too small).
++pub fn readResponse(ptr: ?*anyopaque, out: [*]u8, buf_size: usize) callconv(.c) c_int {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
++    const len = @min(wrapper.response_buffer.items.len, buf_size);
++    if (len == 0) return 0;
++
++    @memcpy(out[0..len], wrapper.response_buffer.items[0..len]);
++
++    // Remove consumed bytes from buffer
++    if (len == wrapper.response_buffer.items.len) {
++        wrapper.response_buffer.clearRetainingCapacity();
++    } else {
++        // Shift remaining bytes to front
++        std.mem.copyForwards(
++            u8,
++            wrapper.response_buffer.items[0..],
++            wrapper.response_buffer.items[len..],
++        );
++        wrapper.response_buffer.shrinkRetainingCapacity(wrapper.response_buffer.items.len - len);
++    }
++
++    return @intCast(len);
++}

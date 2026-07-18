@@ -1,0 +1,45 @@
+services:
+  cas:
+    build:
+      context: .
+    image: algebrium/sagemath-kernel:10.9
+    container_name: algebrium-cas
+    networks:
+      - cas_internal
+    mem_limit: 2g
+    cpus: 2
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /home/sage/.local:size=64m,uid=1001,gid=1001,mode=0700
+      - /home/sage/.sage:size=64m,uid=1001,gid=1001,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sage", "-python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/api', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  gateway:
+    image: algebrium/sagemath-kernel:10.9
+    container_name: algebrium-cas-gateway
+    entrypoint: ["sage", "-python", "/opt/algebrium/proxy.py"]
+    depends_on:
+      cas:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8888:8888"
+    networks:
+      - cas_internal
+      - gateway_edge
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+networks:
+  cas_internal:
+    internal: true
+  gateway_edge:

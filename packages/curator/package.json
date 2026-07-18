@@ -1,0 +1,18 @@
+{
+  "name": "@algebrium/curator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "curator": "bun run ./src/cli.ts",
+    "typecheck": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '../opencode/node_modules/.bin/tsgo.exe' --noEmit -p tsconfig.json\"",
+    "test": "bun test --timeout 30000"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@typescript/native-preview": "^7.0.0-dev.20260715.1",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
+  }
+}

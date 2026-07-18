@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["bun"],
+    "typeRoots": ["../opencode/packages/opencode/node_modules/@types"]
+  },
+  "include": ["src", "test"]
+}

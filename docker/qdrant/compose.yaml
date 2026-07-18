@@ -1,0 +1,14 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: algebrium-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7333:6333"
+    volumes:
+      - ../../data/qdrant:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G

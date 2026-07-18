@@ -1,0 +1,27 @@
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Generated data and caches
+data/*
+!data/.gitkeep
+downloads/*
+!downloads/.gitkeep
+output/
+outputs/
+release/
+.playwright-cli/
+work/*.log
+
+# Dependencies and build output
+node_modules/
+.venv/
+dist/
+target/
+
+# Local logs
+logs/
+
+# Source archives and prompt downloads are local-only.
+提示词文件/
