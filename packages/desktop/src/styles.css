@@ -28,7 +28,8 @@ button { border: 0; cursor: pointer; }
 .history-sidebar { display: flex; flex-direction: column; padding: 16px 12px; border-right: 1px solid var(--line); }
 .sidebar-brand { display: flex; min-height: 42px; gap: 10px; align-items: center; padding: 0 4px 14px; }
 .sidebar-brand strong { font-family: Georgia, "STSong", serif; font-size: 18px; }
-.brand-mark { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; border-radius: 10px; color: #fff; background: var(--green); font-family: Georgia, serif; font-size: 18px; box-shadow: 0 7px 18px rgba(31,89,72,.18); }
+.brand-mark { width: 34px; height: 34px; flex: 0 0 34px; overflow: hidden; border-radius: 10px; box-shadow: 0 7px 18px rgba(31,89,72,.18); }
+.brand-mark img, .empty-sigma img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .icon-button { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border-radius: 8px; color: #68736e; background: transparent; font-size: 22px; }
 .icon-button:hover { background: #e8ece9; }
 .collapse-left { margin-left: auto; }
@@ -59,7 +60,7 @@ button { border: 0; cursor: pointer; }
 .empty-state { display: grid; min-height: 70%; place-items: center; align-content: center; color: var(--muted); text-align: center; }
 .empty-state h2 { margin: 14px 0 6px; color: var(--ink); font-family: Georgia, "STSong", serif; font-size: 22px; }
 .empty-state p { margin: 0; font-size: 13px; }
-.empty-sigma { display: grid; width: 54px; height: 54px; place-items: center; border-radius: 17px; color: #fff; background: var(--green); font-family: Georgia, serif; font-size: 27px; box-shadow: 0 12px 30px rgba(31,89,72,.2); }
+.empty-sigma { width: 54px; height: 54px; overflow: hidden; border-radius: 17px; box-shadow: 0 12px 30px rgba(31,89,72,.2); }
 .message-row { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 11px; align-items: start; margin-bottom: 22px; }
 .message-row.user { margin-left: 12%; }
 .avatar { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 9px; color: #fff; background: var(--green); font-size: 12px; font-weight: 700; }

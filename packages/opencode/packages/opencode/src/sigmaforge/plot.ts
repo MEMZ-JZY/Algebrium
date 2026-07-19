@@ -109,15 +109,24 @@ function cartesianSurface(grid: { x: number[]; y: number[]; z: Array<Array<numbe
   }
 }
 
-const geometrySchema = z.object({ points: z.array(z.object({ id: z.string().regex(/^[A-Za-z][A-Za-z0-9_]*$/), x: z.number().finite(), y: z.number().finite() })).min(2).max(30), segments: z.array(z.tuple([z.string(), z.string()])).max(60) })
+const geometryID = z.string().regex(/^[A-Za-z][A-Za-z0-9_]*$/)
+const geometrySchema = z.object({
+  points: z.array(z.object({ id: geometryID, x: z.number().finite(), y: z.number().finite() })).max(30).default([]),
+  segments: z.array(z.tuple([z.string(), z.string()])).max(60).default([]),
+  circles: z.array(z.object({ id: geometryID, centerX: z.number().finite().min(-1e4).max(1e4), centerY: z.number().finite().min(-1e4).max(1e4), radius: z.number().finite().positive().max(1e4) })).max(20).default([]),
+}).refine((value) => value.points.length > 0 || value.circles.length > 0, "Geometry requires at least one point or circle")
 
 export function plotGeometry(subject: SubjectModule, input: unknown): PlotArtifact {
   assertToolAllowed(subject, "geometry.construct")
   const request = geometrySchema.parse(input)
   const ids = new Set(request.points.map((point) => point.id))
   if (request.segments.some(([from, to]) => !ids.has(from) || !ids.has(to))) throw new Error("Geometry segment references an unknown point")
-  const extent = Math.max(5, ...request.points.flatMap((point) => [Math.abs(point.x), Math.abs(point.y)])) + 1
-  return { id: crypto.randomUUID(), kind: "jsxgraph", mime: "application/vnd.jsxgraph+json", data: { boundingBox: [-extent, extent, extent, -extent], ...request }, meta: { points: request.points.length } }
+  const extent = Math.max(
+    5,
+    ...request.points.flatMap((point) => [Math.abs(point.x), Math.abs(point.y)]),
+    ...request.circles.flatMap((circle) => [Math.abs(circle.centerX) + circle.radius, Math.abs(circle.centerY) + circle.radius]),
+  ) + 1
+  return { id: crypto.randomUUID(), kind: "jsxgraph", mime: "application/vnd.jsxgraph+json", data: { boundingBox: [-extent, extent, extent, -extent], ...request }, meta: { points: request.points.length, circles: request.circles.length } }
 }
 
 function parseJSON<T>(text: string): T {
@@ -134,7 +143,7 @@ export function surface3DSample(subject: SubjectModule): PlotArtifact {
 
 export function geometrySample(subject: SubjectModule): PlotArtifact {
   assertToolAllowed(subject, "geometry.construct")
-  return { id: crypto.randomUUID(), kind: "jsxgraph", mime: "application/vnd.jsxgraph+json", data: { boundingBox: [-5, 5, 5, -5], points: [{ id: "A", x: -2, y: -1 }, { id: "B", x: 2, y: -1 }, { id: "C", x: 0, y: 3 }], segments: [["A", "B"], ["B", "C"], ["C", "A"]] }, meta: { contract: 1 } }
+  return { id: crypto.randomUUID(), kind: "jsxgraph", mime: "application/vnd.jsxgraph+json", data: { boundingBox: [-5, 5, 5, -5], points: [{ id: "A", x: -2, y: -1 }, { id: "B", x: 2, y: -1 }, { id: "C", x: 0, y: 3 }], segments: [["A", "B"], ["B", "C"], ["C", "A"]], circles: [{ id: "c1", centerX: 0, centerY: 0, radius: 2 }] }, meta: { contract: 1 } }
 }
 
 export * as SigmaForgePlot from "./plot"

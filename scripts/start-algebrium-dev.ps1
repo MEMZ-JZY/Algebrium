@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [switch]$SkipDocker
+  [switch]$SkipDocker,
+  [string]$Provider
 )
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -12,7 +13,14 @@ $bun = @(
 if (-not $bun) { throw "Bun was not found. Install Bun or add bun.exe to PATH." }
 
 if (-not $SkipDocker) {
-  & docker compose -f (Join-Path $root "docker\sagemath\compose.yaml") up -d --no-build
+  $sageCompose = Join-Path $root "docker\sagemath\compose.yaml"
+  docker image inspect algebrium/sagemath-kernel:10.9 *> $null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "Building the local Algebrium SageMath image (first run or after an image change)..."
+    & docker compose -f $sageCompose build
+    if ($LASTEXITCODE -ne 0) { throw "SageMath Docker image build failed." }
+  }
+  & docker compose -f $sageCompose up -d --no-build --remove-orphans
   if ($LASTEXITCODE -ne 0) { throw "SageMath Docker startup failed." }
   & docker compose -f (Join-Path $root "docker\qdrant\compose.yaml") up -d --no-build
   if ($LASTEXITCODE -ne 0) { throw "Qdrant Docker startup failed." }
@@ -34,7 +42,8 @@ Stop-Listener 5173
 
 $database = Join-Path $root "data\algebrium.db"
 $providerConfig = Join-Path $root "config.json"
-$backend = "`$env:ALGEBRIUM_KB_PATH = '$database'; `$env:QDRANT_URL = 'http://127.0.0.1:7333'; & '$bun' run algebrium -- --port 4097 --config '$providerConfig'"
+$providerOverride = if ($Provider) { "`$env:ALGEBRIUM_PROVIDER = '$Provider'; " } else { "" }
+$backend = "$providerOverride`$env:ALGEBRIUM_KB_PATH = '$database'; `$env:QDRANT_URL = 'http://127.0.0.1:7333'; & '$bun' run algebrium -- --port 4097 --config '$providerConfig'"
 Start-AlgebriumTerminal "Algebrium Backend" (Join-Path $root "packages\opencode\packages\opencode") $backend
 Start-AlgebriumTerminal "Algebrium Frontend" (Join-Path $root "packages\desktop") "& '$bun' run dev"
 

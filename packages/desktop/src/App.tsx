@@ -11,7 +11,7 @@ type ToolActivity = { id: string; tool: string; status: "running" | "complete" |
 
 export function App() {
   const session = useRef<string | undefined>(undefined)
-  const [question, setQuestion] = useState("求 ∫ x e^x dx")
+  const [question, setQuestion] = useState("")
   const [answer, setAnswer] = useState("")
   const [tools, setTools] = useState<ToolActivity[]>([])
   const [verifications, setVerifications] = useState<VerificationResult[]>([])
@@ -40,21 +40,30 @@ export function App() {
   async function selectSession(id: string) {
     if (loading) return
     session.current = id
+    resetTransientState()
     const detail = await getSession(id)
     setHistory(detail.messages)
-    setAnswer("")
-    setArtifacts([])
-    setArtifacts([])
     setTheory((await getTheory(id)).nodes)
   }
 
   function newSession() {
     if (loading) return
     session.current = undefined
+    setQuestion("")
     setHistory([])
-    setAnswer("")
     setTheory({})
+    resetTransientState()
+  }
+
+  function resetTransientState() {
+    setAnswer("")
+    setTools([])
+    setVerifications([])
     setArtifacts([])
+    setSelected(undefined)
+    setContext(undefined)
+    setError("")
+    setStopping(false)
   }
 
   async function removeSession(id: string) {
@@ -152,7 +161,7 @@ export function App() {
 
   return <main className={`app-shell ${leftCollapsed ? "left-collapsed" : ""} ${rightCollapsed ? "right-collapsed" : ""}`}>
     <aside className="history-sidebar">
-      <div className="sidebar-brand"><div className="brand-mark">A</div>{!leftCollapsed && <strong>Algebrium</strong>}<button type="button" className="icon-button collapse-left" onClick={() => setLeftCollapsed((value) => !value)} aria-label={leftCollapsed ? "展开历史会话" : "折叠历史会话"}>{leftCollapsed ? "›" : "‹"}</button></div>
+      <div className="sidebar-brand"><div className="brand-mark"><img src="/icon-192.png" alt="Algebrium" /></div>{!leftCollapsed && <strong>Algebrium</strong>}<button type="button" className="icon-button collapse-left" onClick={() => setLeftCollapsed((value) => !value)} aria-label={leftCollapsed ? "展开历史会话" : "折叠历史会话"}>{leftCollapsed ? "›" : "‹"}</button></div>
       {!leftCollapsed && <>
         <button type="button" className="new-chat" onClick={newSession}><span>＋</span>新建对话</button>
         <div className="sidebar-label">历史会话</div>
@@ -167,7 +176,7 @@ export function App() {
         <div className="system-status"><span />在线</div>
       </header>
       <article className="conversation" aria-live="polite">
-        {!history.length && !answer && <div className="empty-state"><div className="empty-sigma">Σ</div><h2>从一个数学问题开始</h2><p>支持符号计算、步骤验证、二维与三维交互绘图。</p></div>}
+        {!history.length && !answer && <div className="empty-state"><div className="empty-sigma"><img src="/icon-192.png" alt="Algebrium" /></div><h2>从一个数学问题开始</h2><p>支持符号计算、步骤验证、二维与三维交互绘图。</p></div>}
         {history.map((message, index) => <div className={`message-row ${message.role}`} key={`${message.createdAt}-${index}`}><div className="avatar">{message.role === "user" ? "你" : "A"}</div><div className="message"><span>{message.role === "user" ? "你" : "Algebrium"}</span><RenderBuffer content={message.content} /></div></div>)}
         {answer && <div className="message-row assistant"><div className="avatar">A</div><div className="message streaming"><span>Algebrium</span><RenderBuffer content={answer} /></div></div>}
         <div className="activity-stack">{tools.map((tool) => <ToolCard key={tool.id} activity={tool} />)}{verifications.map((verification, index) => <VerificationCard key={index} verification={verification} />)}{error && <p className="error">{error}</p>}{context && <small className="context">上下文 {context.estimatedTokens}/{context.budget} tokens{context.compressed ? " · 已压缩" : ""}</small>}</div>
@@ -186,7 +195,7 @@ export function App() {
     <aside className="render-sidebar">
       <header className="render-header"><div><h2>函数图像</h2>{!rightCollapsed && <span>{artifacts.length} 个产物</span>}</div><button type="button" className="icon-button" onClick={() => setRightCollapsed((value) => !value)} aria-label={rightCollapsed ? "展开函数图像" : "折叠函数图像"}>{rightCollapsed ? "‹" : "›"}</button></header>
       {!rightCollapsed && <div className="render-content">
-        <div className="plot-gallery">{artifacts.length ? artifacts.map((item) => <ArtifactSlot key={item.id} item={item} />) : <div className="render-empty"><span>⌁</span><strong>暂无函数图像</strong><p>在对话中要求绘制函数、曲面或几何图。</p></div>}</div>
+        <div className="plot-gallery">{artifacts.length ? <ArtifactGallery items={artifacts} /> : <div className="render-empty"><span>⌁</span><strong>暂无函数图像</strong><p>在对话中要求绘制函数、曲面或几何图。</p></div>}</div>
         <details className="theory-drawer"><summary>验证路径</summary><TheoryTree nodes={theory} selected={selected} onSelect={setSelected} /></details>
       </div>}
     </aside>
@@ -276,6 +285,60 @@ function ArtifactSlot({ item }: { item: ArtifactState }) {
   return item.artifact ? <Artifact artifact={item.artifact} /> : null
 }
 
+function ArtifactGallery({ items }: { items: ArtifactState[] }) {
+  const combined = items.filter((item) => item.status === "ready" && (item.artifact?.kind === "plotly2d" || item.artifact?.kind === "jsxgraph"))
+  const separate = items.filter((item) => !combined.includes(item))
+  return <>
+    {combined.length > 0 && <CombinedPlane artifacts={combined.map((item) => item.artifact!)} />}
+    {separate.map((item) => <ArtifactSlot key={item.id} item={item} />)}
+  </>
+}
+
+function CombinedPlane({ artifacts }: { artifacts: PlotArtifact[] }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [coordinates, setCoordinates] = useState("")
+  const [reset, setReset] = useState(0)
+  useEffect(() => {
+    if (!ref.current) return
+    const element = ref.current
+    let release = () => {}
+    void import("jsxgraph").then(({ default: JXG }) => {
+      if (!element.isConnected) return
+      const geometry = artifacts.filter((artifact) => artifact.kind === "jsxgraph").map((artifact) => artifact.data as GeometrySpec)
+      const curves = artifacts.filter((artifact) => artifact.kind === "plotly2d").flatMap((artifact) => {
+        const spec = artifact.data as { data?: Array<{ x?: number[]; y?: Array<number | null>; name?: string }> }
+        return (spec.data ?? []).filter((trace) => Array.isArray(trace.x) && Array.isArray(trace.y))
+      })
+      const values = [
+        ...geometry.flatMap((spec) => spec.points.flatMap((point) => [point.x, point.y])),
+        ...geometry.flatMap((spec) => (spec.circles ?? []).flatMap((circle) => [Math.abs(circle.centerX) + circle.radius, Math.abs(circle.centerY) + circle.radius])),
+        ...curves.flatMap((trace) => [...(trace.x ?? []), ...(trace.y ?? []).filter((value): value is number => typeof value === "number" && Number.isFinite(value))]),
+      ]
+      const extent = Math.max(5, ...values.map((value) => Math.abs(value))) * 1.1
+      const board = JXG.JSXGraph.initBoard(element, { boundingbox: [-extent, extent, extent, -extent], axis: true, pan: { enabled: true }, zoom: { wheel: true, needShift: false } })
+      curves.forEach((trace) => board.create("curve", [trace.x, trace.y], { name: trace.name ?? "函数", strokeWidth: 2.5, strokeColor: "#176b58" }))
+      geometry.forEach((spec) => {
+        const points = new Map(spec.points.map((point) => {
+          const value = board.create("point", [point.x, point.y], { name: point.id })
+          value.on("drag", () => setCoordinates(`${point.id}: (${value.X().toFixed(2)}, ${value.Y().toFixed(2)})`))
+          return [point.id, value]
+        }))
+        spec.segments.forEach(([from, to]) => board.create("segment", [points.get(from), points.get(to)], { strokeColor: "#9a5b2f", strokeWidth: 2 }))
+        ;(spec.circles ?? []).forEach((circle) => {
+          const center = board.create("point", [circle.centerX, circle.centerY], { name: `O_${circle.id}`, size: 2, strokeColor: "#9a5b2f", fillColor: "#fff" })
+          center.on("drag", () => setCoordinates(`${circle.id} 圆心: (${center.X().toFixed(2)}, ${center.Y().toFixed(2)})`))
+          board.create("circle", [center, circle.radius], { name: circle.id, withLabel: true, strokeColor: "#c66a2b", strokeWidth: 2 })
+        })
+      })
+      release = () => JXG.JSXGraph.freeBoard(board)
+    })
+    return () => release()
+  }, [artifacts, reset])
+  return <figure className="interactive combined-plane"><figcaption>二维函数与平面几何联合画布</figcaption><div className="plot-toolbar"><button type="button" onClick={() => setReset((value) => value + 1)}>重置视角</button><button type="button" onClick={() => void ref.current?.requestFullscreen()}>全屏</button>{coordinates && <output>{coordinates}</output>}</div><div className="interactive-plot" ref={ref} /></figure>
+}
+
+type GeometrySpec = { boundingBox: [number, number, number, number]; points: { id: string; x: number; y: number }[]; segments: [string, string][]; circles?: { id: string; centerX: number; centerY: number; radius: number }[] }
+
 function Artifact({ artifact }: { artifact: PlotArtifact }) {
   const ref = useRef<HTMLDivElement>(null)
   const [coordinates, setCoordinates] = useState("")
@@ -295,7 +358,7 @@ function Artifact({ artifact }: { artifact: PlotArtifact }) {
     let release = () => {}
     void import("jsxgraph").then(({ default: JXG }) => {
       if (!element.isConnected) return
-      const spec = artifact.data as { boundingBox: [number, number, number, number]; points: { id: string; x: number; y: number }[]; segments: [string, string][] }
+      const spec = artifact.data as GeometrySpec
       const board = JXG.JSXGraph.initBoard(element, { boundingbox: spec.boundingBox, axis: true })
       const points = new Map(spec.points.map((point) => {
         const value = board.create("point", [point.x, point.y], { name: point.id })
@@ -303,6 +366,11 @@ function Artifact({ artifact }: { artifact: PlotArtifact }) {
         return [point.id, value]
       }))
       spec.segments.forEach(([from, to]) => board.create("segment", [points.get(from), points.get(to)]))
+      ;(spec.circles ?? []).forEach((circle) => {
+        const center = board.create("point", [circle.centerX, circle.centerY], { name: `O_${circle.id}`, size: 2 })
+        center.on("drag", () => setCoordinates(`${circle.id} 圆心: (${center.X().toFixed(2)}, ${center.Y().toFixed(2)})`))
+        board.create("circle", [center, circle.radius], { name: circle.id, withLabel: true, strokeColor: "#c66a2b", strokeWidth: 2 })
+      })
       release = () => JXG.JSXGraph.freeBoard(board)
     })
     return () => release()

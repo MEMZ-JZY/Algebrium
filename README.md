@@ -31,7 +31,7 @@ docker compose -f docker\sagemath\compose.yaml build
 .\scripts\start-algebrium.ps1
 ```
 
-The launcher securely prompts for the active profile's API key for the current PowerShell session; it never writes the key to `config.json`. It starts Docker services plus separate backend and frontend windows. Open `http://127.0.0.1:5173/`, wait for `http://127.0.0.1:4097/health` to return `{"ok":true}`, then ask a question such as `求 ∫ x e^x dx`.
+The launcher lets you choose a configured provider with the arrow keys, then securely prompts for its API key for the current PowerShell session; it never writes the selection or key to `config.json`. It starts Docker services plus separate backend and frontend windows. Open `http://127.0.0.1:5173/`, wait for `http://127.0.0.1:4097/health` to return `{"ok":true}`, then ask a question such as `求 ∫ x e^x dx`.
 
 Use `.\scripts\start-algebrium.ps1 -SkipDocker` after Docker is already healthy. Closing either spawned terminal stops that development service. Stop containers with:
 

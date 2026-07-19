@@ -31,6 +31,47 @@ describe("SigmaForge provider configuration", () => {
     await Bun.write(unsafe, JSON.stringify({ provider: { mode: "real", active: "bad", profiles: { bad: { provider: "deepseek", model: "model", apiKeyEnv: "KEY", headers: { Authorization: "secret" } } } } }))
     expect(loadSigmaForgeConfig(unsafe)).rejects.toThrow("Authorization")
   })
+
+  test("allows the launcher to override the selected provider for its process", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "sigmaforge-provider-"))
+    directories.push(directory)
+    const path = join(directory, "config.json")
+    await Bun.write(path, JSON.stringify({ provider: { mode: "real", active: "local", profiles: {
+      local: { provider: "custom", model: "local-model", baseURL: "http://127.0.0.1:9999/v1", apiKeyEnv: "LOCAL_API_KEY" },
+      alternate: { provider: "custom", model: "alternate-model", baseURL: "http://127.0.0.1:9998/v1", apiKeyEnv: "ALTERNATE_API_KEY" },
+    } } }))
+    const previous = process.env.ALGEBRIUM_PROVIDER
+    process.env.ALGEBRIUM_PROVIDER = "alternate"
+    try {
+      expect((await loadSigmaForgeConfig(path)).provider.active).toBe("alternate")
+    } finally {
+      if (previous === undefined) delete process.env.ALGEBRIUM_PROVIDER
+      else process.env.ALGEBRIUM_PROVIDER = previous
+    }
+  })
+
+  test("loads a custom provider supplied by the launcher", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "sigmaforge-provider-"))
+    directories.push(directory)
+    const path = join(directory, "config.json")
+    await Bun.write(path, JSON.stringify({ provider: { mode: "real", active: "local", profiles: {
+      local: { provider: "custom", model: "local-model", baseURL: "http://127.0.0.1:9999/v1", apiKeyEnv: "LOCAL_API_KEY" },
+    } } }))
+    const previous = { provider: process.env.ALGEBRIUM_PROVIDER, baseURL: process.env.ALGEBRIUM_CUSTOM_BASE_URL, model: process.env.ALGEBRIUM_CUSTOM_MODEL }
+    process.env.ALGEBRIUM_PROVIDER = "custom"
+    process.env.ALGEBRIUM_CUSTOM_BASE_URL = "https://custom.example.com/v1"
+    process.env.ALGEBRIUM_CUSTOM_MODEL = "custom-model"
+    try {
+      const config = await loadSigmaForgeConfig(path)
+      expect(config.provider.active).toBe("custom")
+      expect(createConfiguredProvider(config, { ALGEBRIUM_CUSTOM_API_KEY: "secret" })?.model).toBe("custom-model")
+    } finally {
+      for (const [name, value] of Object.entries({ ALGEBRIUM_PROVIDER: previous.provider, ALGEBRIUM_CUSTOM_BASE_URL: previous.baseURL, ALGEBRIUM_CUSTOM_MODEL: previous.model })) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
+  })
 })
 
 test("streams OpenAI-compatible chunks and sends the configured model", async () => {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { CASToolbox } from "@/sigmaforge/cas"
 import type { KernelExecutor } from "@/sigmaforge/kernel"
-import { geometrySample, surface3DSample } from "@/sigmaforge/plot"
+import { geometrySample, plotGeometry, surface3DSample } from "@/sigmaforge/plot"
 import { mathModule, physicsModule } from "@/sigmaforge/subject"
 import { verifyStep } from "@/sigmaforge/verifier"
 import { normalizeMathExpression } from "@/sigmaforge/expression"
@@ -79,5 +79,16 @@ describe("SigmaForge CAS tools", () => {
     expect((surface.data as { data: unknown[] }).data).toHaveLength(5)
     expect(surface.meta.coordinateSystem).toBe("cartesian-xyz")
     expect(geometrySample(mathModule).kind).toBe("jsxgraph")
+  })
+
+  test("creates circle-only geometry and rejects invalid radii", () => {
+    const artifact = plotGeometry(mathModule, { circles: [{ id: "c1", centerX: 1, centerY: -2, radius: 3 }] })
+    const data = artifact.data as { circles: Array<{ radius: number }>; points: unknown[]; segments: unknown[] }
+    expect(artifact.kind).toBe("jsxgraph")
+    expect(data.circles[0]?.radius).toBe(3)
+    expect(data.points).toEqual([])
+    expect(data.segments).toEqual([])
+    expect(() => plotGeometry(mathModule, { circles: [{ id: "c1", centerX: 0, centerY: 0, radius: 0 }] })).toThrow()
+    expect(() => plotGeometry(mathModule, {})).toThrow("at least one point or circle")
   })
 })

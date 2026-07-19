@@ -9,13 +9,13 @@
 .\scripts\start-algebrium-dev.ps1
 ```
 
-脚本会启动 SageMath 与 Qdrant Docker 服务，停止占用 Algebrium 调试端口的旧进程，并分别打开后端与前端终端窗口。前端地址为 `http://127.0.0.1:5173/`，后端健康检查为 `http://127.0.0.1:4097/health`，Qdrant 为 `http://127.0.0.1:7333/healthz`。
+脚本会先显示 `config.json` 中的 Provider 列表和 `custom` 选项，可使用上下方向键选择、按 Enter 确认，然后安全输入该 Provider 的 API Key。选择 `custom` 时还会输入 OpenAI-compatible API base URL 和模型 ID。所有选择和密钥只在本次启动进程中生效，不会写回配置文件。脚本随后启动 SageMath 与 Qdrant Docker 服务，停止占用 Algebrium 调试端口的旧进程，并分别打开后端与前端终端窗口。前端地址为 `http://127.0.0.1:5173/`，后端健康检查为 `http://127.0.0.1:4097/health`，Qdrant 为 `http://127.0.0.1:7333/healthz`。
 
 首次使用 Phase 4 前，在 `packages/curator` 执行 `bun run curator collect`，建立 SQLite 元数据并写入 Qdrant 种子索引。
 
 ## 真实模型 Provider
 
-根目录 `config.json` 选择当前 Provider 和模型，API Key 由配置中的 `apiKeyEnv` 指向环境变量。例如使用 DeepSeek：
+根目录 `config.json` 提供 Provider 和模型列表。启动 `start-algebrium.ps1` 时可交互选择 Provider，API Key 由所选配置中的 `apiKeyEnv` 指向环境变量。也可以手动设置该环境变量后直接启动开发脚本：
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "your-key"

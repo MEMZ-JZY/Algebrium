@@ -15,8 +15,14 @@ export type SigmaForgeConfig = z.infer<typeof SigmaForgeConfigSchema>
 export async function loadSigmaForgeConfig(path = defaultConfigPath()) {
   if (!await Bun.file(path).exists()) throw new Error(`SigmaForge config not found: ${path}`)
   const config = SigmaForgeConfigSchema.parse(await Bun.file(path).json())
-  if (!config.provider.profiles[config.provider.active]) throw new Error(`Active provider profile not found: ${config.provider.active}`)
-  return config
+  const customBaseURL = process.env.ALGEBRIUM_CUSTOM_BASE_URL?.trim()
+  const customModel = process.env.ALGEBRIUM_CUSTOM_MODEL?.trim()
+  const profiles = customBaseURL && customModel
+    ? { ...config.provider.profiles, custom: ProviderConfigSchema.parse({ provider: "custom", baseURL: customBaseURL, model: customModel, apiKeyEnv: "ALGEBRIUM_CUSTOM_API_KEY" }) }
+    : config.provider.profiles
+  const active = process.env.ALGEBRIUM_PROVIDER?.trim() || config.provider.active
+  if (!profiles[active]) throw new Error(`Provider profile not found: ${active}`)
+  return { ...config, provider: { ...config.provider, active, profiles } }
 }
 
 export function createConfiguredProvider(config: SigmaForgeConfig, environment?: Record<string, string | undefined>): ChatProvider | undefined {

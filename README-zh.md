@@ -31,7 +31,7 @@ docker compose -f docker\sagemath\compose.yaml build
 .\scripts\start-algebrium.ps1
 ```
 
-首次启动脚本会安全地提示输入当前 Provider 的 API Key，仅写入本次 PowerShell 进程，不会写入 `config.json`。脚本会启动 Docker 服务，以及独立的后端和前端终端窗口。
+首次启动脚本会显示 Provider 列表，可使用上下方向键选择、按 Enter 确认，然后安全地提示输入对应 API Key。Provider 选择和密钥仅写入本次 PowerShell 进程，不会写入 `config.json`。脚本会启动 Docker 服务，以及独立的后端和前端终端窗口。
 
 打开 `http://127.0.0.1:5173/`，确认 `http://127.0.0.1:4097/health` 返回 `{"ok":true}`，然后可输入 `求 ∫ x e^x dx` 进行验收。Docker 已健康时可使用 `.\scripts\start-algebrium.ps1 -SkipDocker`。关闭任一启动的终端窗口会停止相应开发服务。
 
