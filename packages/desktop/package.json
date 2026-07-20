@@ -14,7 +14,8 @@
     "jsxgraph": "^1.11.1",
     "katex": "^0.16.22",
     "marked": "^15.0.12",
-    "plotly.js-dist-min": "^3.0.1",
+    "plotly.js-basic-dist-min": "3.7.0",
+    "plotly.js-gl3d-dist-min": "3.7.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

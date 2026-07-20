@@ -7,41 +7,58 @@
         "provider": "deepseek",
         "model": "deepseek-v4-flash",
         "apiKeyEnv": "DEEPSEEK_API_KEY",
-        "maxTokens": 4096
+        "maxTokens": 4096,
+        "timeoutMs": 120000,
+        "headers": {},
+        "extraBody": {}
       },
       "mimo": {
         "provider": "mimo",
         "model": "mimo-v2.5-pro",
         "apiKeyEnv": "MIMO_API_KEY",
-        "maxTokens": 4096
+        "maxTokens": 4096,
+        "timeoutMs": 120000,
+        "headers": {},
+        "extraBody": {}
       },
       "kimi": {
         "provider": "kimi",
         "model": "kimi-k2.7",
         "apiKeyEnv": "KIMI_API_KEY",
-        "maxTokens": 4096
+        "maxTokens": 4096,
+        "timeoutMs": 120000,
+        "headers": {},
+        "extraBody": {}
       },
       "volcengine": {
         "provider": "volcengine",
         "model": "YOUR_ARK_ENDPOINT_OR_MODEL_ID",
         "apiKeyEnv": "ARK_API_KEY",
-        "maxTokens": 4096
+        "maxTokens": 4096,
+        "timeoutMs": 120000,
+        "headers": {},
+        "extraBody": {}
       },
       "openrouter": {
         "provider": "openrouter",
         "model": "deepseek/deepseek-chat",
         "apiKeyEnv": "OPENROUTER_API_KEY",
         "maxTokens": 4096,
+        "timeoutMs": 120000,
         "headers": {
           "HTTP-Referer": "http://localhost",
           "X-OpenRouter-Title": "Algebrium"
-        }
+        },
+        "extraBody": {}
       },
       "siliconflow": {
         "provider": "siliconflow",
         "model": "deepseek-ai/DeepSeek-V3.2",
         "apiKeyEnv": "SILICONFLOW_API_KEY",
-        "maxTokens": 4096
+        "maxTokens": 4096,
+        "timeoutMs": 120000,
+        "headers": {},
+        "extraBody": {}
       }
     }
   }

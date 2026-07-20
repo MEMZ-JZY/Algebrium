@@ -10,7 +10,8 @@
         "jsxgraph": "^1.11.1",
         "katex": "^0.16.22",
         "marked": "^15.0.12",
-        "plotly.js-dist-min": "^3.0.1",
+        "plotly.js-basic-dist-min": "3.7.0",
+        "plotly.js-gl3d-dist-min": "3.7.0",
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
       },
@@ -280,7 +281,9 @@
 
     "picomatch": ["picomatch@4.0.5", "", {}, "sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A=="],
 
-    "plotly.js-dist-min": ["plotly.js-dist-min@3.7.0", "", {}, "sha512-IRWNnBJZmKss3URDnicBK2nvt/VTSi/MD1GnUscAYFjwSuN6g/CTde5R1UC0RYtblehj8rkT4BL8r05e/c8j5Q=="],
+    "plotly.js-basic-dist-min": ["plotly.js-basic-dist-min@3.7.0", "", {}, "sha512-84KPQhLTrO5IHu6DCte2KwA4bzSoVIdIs3uDPWid3sgeTX8L5RjpDARjCG3spgOwQ8MYE8PL+MeQ0DQRWA1Emw=="],
+
+    "plotly.js-gl3d-dist-min": ["plotly.js-gl3d-dist-min@3.7.0", "", {}, "sha512-44QPf8B49X/AkSyfSJValsOAUNTjXXKmRwwBhFiKN9fNQIAjQ1BsS1FILpXExD/vUpCcCseRaFVVrx1UR2ckxw=="],
 
     "postcss": ["postcss@8.5.19", "", { "dependencies": { "nanoid": "^3.3.12", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-Mz8SaolMd8nB+G13WkORcxQKHZ/NE4xXevtkJHVuG+guo9/wYKlIMTKAqGdEmYOXR2ijPjTYNHssizdaVSUNdQ=="],
 

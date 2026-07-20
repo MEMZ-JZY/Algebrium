@@ -27,6 +27,9 @@ export type TheoryNode = {
   children: string[]
 }
 export type TheoryTree = { sessionID: string; rootID?: string; version: number; nodes: Record<string, TheoryNode> }
+export type ProviderProfile = { id: string; provider: string; model: string; baseURL?: string; apiKeyEnv: string; hasApiKey: boolean }
+export type ProviderSettings = { active: string; profiles: Record<string, ProviderProfile> }
+export type ProviderSettingsInput = { id: string; provider: string; model: string; baseURL?: string; apiKey?: string }
 export type StreamEvent =
   | { type: "chunk"; text: string }
   | { type: "tool.start"; tool: string }
@@ -70,6 +73,14 @@ export async function uploadSessionFile(sessionID: string, file: File) {
 
 export function stopSigmaForge(sessionID: string) {
   return request<{ stopped: boolean }>(`/sessions/${sessionID}/stop`, { method: "POST" })
+}
+
+export function getProviderSettings() {
+  return request<ProviderSettings>("/settings/provider")
+}
+
+export function updateProviderSettings(input: ProviderSettingsInput) {
+  return request<ProviderSettings>("/settings/provider", { method: "PUT", body: JSON.stringify(input) })
 }
 
 export async function askSigmaForge(sessionID: string, message: string, onEvent: (event: StreamEvent) => void) {

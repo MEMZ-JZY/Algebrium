@@ -29,6 +29,10 @@ export type SigmaForgeServerOptions = {
   knowledgeBase?: KnowledgeBaseReader
   mistakeSink?: MistakeSink
   sessionStoragePath?: string
+  providerSettings?: {
+    get: () => unknown | Promise<unknown>
+    update: (input: unknown) => ChatProvider | Promise<ChatProvider>
+  }
 }
 
 export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
@@ -38,6 +42,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
   const kernel = options.kernel ?? new KernelGatewayClient()
   const cas = new CASToolbox(kernel)
   const mockProvider = options.mockProvider ?? !options.provider
+  let activeProvider = options.provider
   const publish = (sessionID: string, event: StreamEvent) => {
     const current = listeners.get(sessionID)
     if (!current) return
@@ -59,7 +64,20 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
       const headers = corsHeaders(request)
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers })
       if (request.method === "GET" && url.pathname === "/health") {
-        return Response.json({ ok: true, provider: mockProvider ? { mode: "mock" } : { mode: "real", id: options.provider?.id, model: options.provider?.model } }, { headers })
+        return Response.json({ ok: true, provider: mockProvider ? { mode: "mock" } : { mode: "real", id: activeProvider?.id, model: activeProvider?.model } }, { headers })
+      }
+      if (request.method === "GET" && url.pathname === "/settings/provider") {
+        if (!options.providerSettings) return jsonError(new Error("Provider settings are not available"), 501, headers)
+        return Response.json(await options.providerSettings.get(), { headers })
+      }
+      if (request.method === "PUT" && url.pathname === "/settings/provider") {
+        if (!options.providerSettings) return jsonError(new Error("Provider settings are not available"), 501, headers)
+        try {
+          activeProvider = await options.providerSettings.update(await request.json())
+          return Response.json(await options.providerSettings.get(), { headers })
+        } catch (error) {
+          return jsonError(error, statusFor(error), headers)
+        }
       }
 
       if (request.method === "POST" && url.pathname === "/sessions") {
@@ -231,7 +249,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
         try {
           const input = (await request.json()) as { message?: string }
           if (!input.message?.trim()) return jsonError(new Error("Message is required"), 400, headers)
-          if (!mockProvider && !options.provider) return jsonError(new Error("A real provider is not configured"), 503, headers)
+          if (!mockProvider && !activeProvider) return jsonError(new Error("A real provider is not configured"), 503, headers)
           sessions.begin(sessionID)
           const controller = new AbortController()
           requests.set(sessionID, controller)
@@ -240,7 +258,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           options.onContext?.(providerContext)
           const reply = mockProvider
             ? emitMockReply(sessionID, input.message, sessions, cas, kernel, publish, options.knowledgeBase, options.mistakeSink)
-            : emitProviderReply(sessionID, sessions, options.provider!, providerContext, cas, kernel, publish, controller.signal)
+            : emitProviderReply(sessionID, sessions, activeProvider!, providerContext, cas, kernel, publish, controller.signal)
           void reply.catch((error) => {
             sessions.end(sessionID)
             publish(sessionID, { type: "error", message: error instanceof Error ? error.message : String(error) })
@@ -560,7 +578,7 @@ function corsHeaders(request: Request) {
   return {
     "access-control-allow-origin": origin && allowedOrigins.has(origin) ? origin : "http://tauri.localhost",
     "access-control-allow-headers": "content-type",
-    "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
+    "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
   }
 }
 

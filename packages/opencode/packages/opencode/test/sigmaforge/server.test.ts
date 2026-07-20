@@ -76,6 +76,25 @@ describe("SigmaForge streaming server", () => {
     await reader.cancel()
   })
 
+  test("reads and updates the active provider through local settings", async () => {
+    let active = provider
+    server = startSigmaForgeServer({
+      port: 0,
+      mockProvider: false,
+      provider: active,
+      providerSettings: {
+        get: () => ({ active: active.id, profiles: {} }),
+        update: () => (active = { ...provider, id: "alternate", model: "alternate-model" }),
+      },
+    })
+    const origin = `http://${server.hostname}:${server.port}`
+    expect(await (await fetch(`${origin}/settings/provider`)).json()).toMatchObject({ active: "test" })
+    const updated = await fetch(`${origin}/settings/provider`, { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" })
+    expect(updated.status).toBe(200)
+    expect(await updated.json()).toMatchObject({ active: "alternate" })
+    expect(await (await fetch(`${origin}/health`)).json()).toMatchObject({ provider: { id: "alternate", model: "alternate-model" } })
+  })
+
   test("rejects unknown subjects", async () => {
     server = startSigmaForgeServer({ port: 0 })
     const response = await fetch(`http://${server.hostname}:${server.port}/sessions`, {
