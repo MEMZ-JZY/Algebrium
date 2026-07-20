@@ -12,7 +12,7 @@
     "@tauri-apps/api": "^2.8.0",
     "dompurify": "^3.2.6",
     "jsxgraph": "^1.11.1",
-    "katex": "^0.16.22",
+    "katex": "^0.18.1",
     "marked": "^15.0.12",
     "plotly.js-basic-dist-min": "3.7.0",
     "plotly.js-gl3d-dist-min": "3.7.0",
