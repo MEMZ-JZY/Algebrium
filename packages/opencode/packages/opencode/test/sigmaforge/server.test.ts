@@ -3,9 +3,14 @@ import { startSigmaForgeServer } from "@/sigmaforge/server"
 import type { KernelExecutor } from "@/sigmaforge/kernel"
 import type { KnowledgeBaseReader, KBEntry } from "@/sigmaforge/kb"
 import type { ChatProvider } from "@/sigmaforge/provider"
+import type { WebSearchClient } from "@/sigmaforge/web-search"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 class ServerKernel implements KernelExecutor {
   readonly calls: string[] = []
+  readonly resetSessions: string[] = []
 
   async execute(_sessionID: string, code: string) {
     this.calls.push(code)
@@ -13,6 +18,10 @@ class ServerKernel implements KernelExecutor {
     if (code.includes("p.show")) return { text: "", images: ["iVBORw0KGgo="] }
     if (code.includes("d == 0")) return { text: "0\nTrue", images: [] }
     return { text: "(x - 1)*e^x", images: [] }
+  }
+
+  async reset(sessionID: string) {
+    this.resetSessions.push(sessionID)
   }
 }
 
@@ -34,9 +43,11 @@ const provider: ChatProvider = {
 }
 
 let server: ReturnType<typeof startSigmaForgeServer> | undefined
+const directories: string[] = []
 afterEach(() => {
   void server?.stop(true)
   server = undefined
+  directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }))
 })
 
 describe("SigmaForge streaming server", () => {
@@ -59,8 +70,25 @@ describe("SigmaForge streaming server", () => {
     expect(sent.status).toBe(202)
     const body = await (await events).text()
     expect(body).toContain('"type":"done"')
+    expect(body).toContain('"type":"answer"')
     expect(body).toContain('"type":"theory.updated"')
     expect(body.indexOf("瞬时变化率")).toBeLessThan(body.indexOf("切线的斜率"))
+    expect(body.indexOf('"type":"answer"')).toBeLessThan(body.indexOf('"type":"done"'))
+
+    const nextEvents = fetch(`${origin}/sessions/${session.id}/events`)
+    await Bun.sleep(10)
+    await fetch(`${origin}/sessions/${session.id}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "再解释一次导数" }),
+    })
+    await (await nextEvents).text()
+    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { processRuns: Array<{ completed: boolean; events: Array<{ type: string }> }> }
+    expect(detail.processRuns).toHaveLength(2)
+    expect(detail.processRuns[0]?.completed).toBe(true)
+    expect(detail.processRuns[0]?.events.some((event) => event.type === "chunk")).toBe(true)
+    expect(detail.processRuns[0]?.events.some((event) => event.type === "answer")).toBe(true)
+    expect(detail.processRuns[1]?.completed).toBe(true)
   })
 
   test("opens the SSE stream before a message is submitted", async () => {
@@ -106,11 +134,13 @@ describe("SigmaForge streaming server", () => {
   })
 
   test("deletes an idle history session", async () => {
-    server = startSigmaForgeServer({ port: 0 })
+    const kernel = new ServerKernel()
+    server = startSigmaForgeServer({ port: 0, kernel })
     const origin = `http://${server.hostname}:${server.port}`
     const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
     const session = (await created.json()) as { id: string }
     expect((await fetch(`${origin}/sessions/${session.id}`, { method: "DELETE" })).status).toBe(200)
+    expect(kernel.resetSessions).toEqual([session.id])
     expect((await fetch(`${origin}/sessions/${session.id}`)).status).toBe(404)
   })
 
@@ -138,6 +168,28 @@ describe("SigmaForge streaming server", () => {
     const contextBody = await context.text()
     expect(contextBody).toContain('"budget":8192')
     expect(contextBody).not.toContain('"prompt"')
+  })
+
+  test("restores verification and plot artifacts after a server restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "sigmaforge-server-sessions-"))
+    directories.push(directory)
+    const storage = join(directory, "sessions.json")
+    server = startSigmaForgeServer({ port: 0, kernel: new ServerKernel(), sessionStoragePath: storage })
+    let origin = `http://${server.hostname}:${server.port}`
+    const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+    const session = (await created.json()) as { id: string }
+    const events = fetch(`${origin}/sessions/${session.id}/events`)
+    await Bun.sleep(10)
+    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "求 ∫ x e^x dx" }) })
+    await (await events).text()
+    await server.stop(true)
+    server = startSigmaForgeServer({ port: 0, kernel: new ServerKernel(), sessionStoragePath: storage })
+    origin = `http://${server.hostname}:${server.port}`
+    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { artifacts: Array<{ kind: string }> }
+    expect(detail.artifacts.map((artifact) => artifact.kind)).toEqual(["plotly2d"])
+    const theory = await (await fetch(`${origin}/sessions/${session.id}/theory`)).text()
+    expect(theory).toContain('"status":"verified"')
+    expect(theory).toContain('"artifactIDs"')
   })
 
   test("keeps KB access subject-scoped and streams mistake learning guidance", async () => {
@@ -173,6 +225,32 @@ describe("SigmaForge streaming server", () => {
     expect(stream).toContain("真实")
     expect(stream).toContain("回复")
     expect(stream).toContain('"type":"done"')
+  })
+
+  test("buffers provider output into complete lines and keeps reasoning before the answer", async () => {
+    const lineProvider: ChatProvider = {
+      id: "test",
+      model: "line-model",
+      async stream(_request, onChunk, onReasoning) {
+        onReasoning?.("先分")
+        onReasoning?.("析\n")
+        onChunk("第一")
+        onChunk("行\n第二行")
+        return { content: "第一行\n第二行", toolCalls: [] }
+      },
+    }
+    server = startSigmaForgeServer({ port: 0, mockProvider: false, provider: lineProvider })
+    const origin = `http://${server.hostname}:${server.port}`
+    const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+    const session = (await created.json()) as { id: string }
+    const events = fetch(`${origin}/sessions/${session.id}/events`)
+    await Bun.sleep(10)
+    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "逐行回答" }) })
+    const stream = await (await events).text()
+    expect(stream).toContain('"type":"reasoning.chunk","text":"先分析\\n"')
+    expect(stream).toContain('"type":"chunk","text":"第一行\\n"')
+    expect(stream).toContain('"type":"chunk","text":"第二行"')
+    expect(stream.indexOf('"type":"reasoning.chunk"')).toBeLessThan(stream.indexOf('"type":"chunk"'))
   })
 
   test("executes real provider CAS, verification, and plot tool calls before the final answer", async () => {
@@ -211,6 +289,121 @@ describe("SigmaForge streaming server", () => {
     expect(stream).toContain("已使用真实工具")
     expect(requests[0]?.tools?.some((tool) => tool.function.name === "sigmaforge_integrate")).toBe(true)
     expect(requests[1]?.messages?.filter((message) => message.role === "tool")).toHaveLength(3)
+  })
+
+  test("permits explicit web search, persists cited sources, and exposes them in the session", async () => {
+    let calls = 0
+    const webSearch: WebSearchClient = {
+      async search(input) {
+        calls++
+        expect(input).toEqual({ query: "gamma function", limit: 2 })
+        return { query: "gamma function", sources: [{ title: "DLMF Gamma", url: "https://dlmf.nist.gov/5.2", domain: "dlmf.nist.gov", snippet: "Definition" }] }
+      },
+    }
+    let round = 0
+    const webProvider: ChatProvider = {
+      id: "test",
+      model: "web-model",
+      async stream(_request, onChunk) {
+        round++
+        if (round === 1) return { content: "", toolCalls: [{ id: "web", name: "sigmaforge_web_search", arguments: '{"query":"gamma function","limit":2}' }] }
+        onChunk("已列出可核查来源。")
+        return { content: "已列出可核查来源。", toolCalls: [] }
+      },
+    }
+    server = startSigmaForgeServer({ port: 0, mockProvider: false, provider: webProvider, webSearch })
+    const origin = `http://${server.hostname}:${server.port}`
+    const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+    const session = (await created.json()) as { id: string }
+    const events = fetch(`${origin}/sessions/${session.id}/events`)
+    await Bun.sleep(10)
+    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "请联网搜索 gamma function 的权威出处" }) })
+    const stream = await (await events).text()
+    expect(calls).toBe(1)
+    expect(stream).toContain('"type":"web.result"')
+    expect(stream).toContain("https://dlmf.nist.gov/5.2")
+    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { webResults: Array<{ sources: unknown[] }> }
+    expect(detail.webResults[0]?.sources).toHaveLength(1)
+  })
+
+  test("permits web search without an explicit user request even when the local KB matches", async () => {
+    let webCalls = 0
+    const webSearch: WebSearchClient = { async search() { webCalls++; return { query: "", sources: [] } } }
+    let round = 0
+    const webProvider: ChatProvider = {
+      id: "test",
+      model: "web-fallback-model",
+      async stream(_request, onChunk) {
+        round++
+        if (round === 1) return { content: "", toolCalls: [{ id: "web", name: "sigmaforge_web_search", arguments: '{"query":"分部积分"}' }] }
+        onChunk("已查询网络来源。")
+        return { content: "已查询网络来源。", toolCalls: [] }
+      },
+    }
+    server = startSigmaForgeServer({ port: 0, mockProvider: false, provider: webProvider, knowledgeBase, webSearch })
+    const origin = `http://${server.hostname}:${server.port}`
+    const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+    const session = (await created.json()) as { id: string }
+    const events = fetch(`${origin}/sessions/${session.id}/events`)
+    await Bun.sleep(10)
+    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "解释分部积分" }) })
+    const stream = await (await events).text()
+    expect(webCalls).toBe(1)
+    expect(stream).toContain('"type":"web.result"')
+    expect(stream).not.toContain('"type":"kb.result"')
+  })
+
+  test("falls back to the controlled search only when the local KB has no match", async () => {
+    let webCalls = 0
+    const webSearch: WebSearchClient = { async search() { webCalls++; return { query: "unknown theorem", sources: [] } } }
+    let round = 0
+    const webProvider: ChatProvider = {
+      id: "test",
+      model: "web-empty-kb-model",
+      async stream(_request, onChunk) {
+        round++
+        if (round === 1) return { content: "", toolCalls: [{ id: "web", name: "sigmaforge_web_search", arguments: '{"query":"unknown theorem"}' }] }
+        onChunk("本地没有匹配内容，已查询受控来源。")
+        return { content: "本地没有匹配内容，已查询受控来源。", toolCalls: [] }
+      },
+    }
+    const emptyKnowledgeBase: KnowledgeBaseReader = { get: () => undefined, search: async () => [], similar: async () => [] }
+    server = startSigmaForgeServer({ port: 0, mockProvider: false, provider: webProvider, knowledgeBase: emptyKnowledgeBase, webSearch })
+    const origin = `http://${server.hostname}:${server.port}`
+    const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+    const session = (await created.json()) as { id: string }
+    const events = fetch(`${origin}/sessions/${session.id}/events`)
+    await Bun.sleep(10)
+    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "解释 unknown theorem" }) })
+    const stream = await (await events).text()
+    expect(webCalls).toBe(1)
+    expect(stream).toContain('"type":"web.result"')
+  })
+
+  test("reports a controlled-search outage without exposing a general browsing fallback", async () => {
+    const webSearch: WebSearchClient = { async search() { throw new Error("Local SearXNG search failed: 503") } }
+    let round = 0
+    const webProvider: ChatProvider = {
+      id: "test",
+      model: "web-error-model",
+      async stream(_request, onChunk) {
+        round++
+        if (round === 1) return { content: "", toolCalls: [{ id: "web", name: "sigmaforge_web_search", arguments: '{"query":"Euler formula"}' }] }
+        onChunk("本地检索不可用。")
+        return { content: "本地检索不可用。", toolCalls: [] }
+      },
+    }
+    server = startSigmaForgeServer({ port: 0, mockProvider: false, provider: webProvider, webSearch })
+    const origin = `http://${server.hostname}:${server.port}`
+    const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+    const session = (await created.json()) as { id: string }
+    const events = fetch(`${origin}/sessions/${session.id}/events`)
+    await Bun.sleep(10)
+    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "请联网搜索 Euler formula" }) })
+    const stream = await (await events).text()
+    expect(stream).toContain('"type":"tool.error"')
+    expect(stream).toContain("Local SearXNG search failed: 503")
+    expect(stream).not.toContain('"type":"web.result"')
   })
 
   test("rejects a provider request for a disabled tool", async () => {

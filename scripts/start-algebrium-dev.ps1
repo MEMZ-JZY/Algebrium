@@ -6,9 +6,10 @@ param(
 
 $root = Split-Path -Parent $PSScriptRoot
 $bun = @(
-  (Get-Command bun -ErrorAction SilentlyContinue).Source,
-  (Join-Path $env:LOCALAPPDATA "npm\node_modules\bun\bin\bun.exe")
-) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+  (Join-Path $env:LOCALAPPDATA "npm\node_modules\bun\bin\bun.exe"),
+  (Get-Command bun.exe -ErrorAction SilentlyContinue).Source,
+  (Get-Command bun.cmd -ErrorAction SilentlyContinue).Source
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) -and [IO.Path]::GetExtension($_) -in ".exe", ".cmd" } | Select-Object -First 1
 
 if (-not $bun) { throw "Bun was not found. Install Bun or add bun.exe to PATH." }
 
@@ -24,6 +25,8 @@ if (-not $SkipDocker) {
   if ($LASTEXITCODE -ne 0) { throw "SageMath Docker startup failed." }
   & docker compose -f (Join-Path $root "docker\qdrant\compose.yaml") up -d --no-build
   if ($LASTEXITCODE -ne 0) { throw "Qdrant Docker startup failed." }
+  & docker compose -f (Join-Path $root "docker\searxng\compose.yaml") up -d
+  if ($LASTEXITCODE -ne 0) { throw "Local SearXNG startup failed." }
 }
 
 function Stop-Listener([int]$Port) {
@@ -31,23 +34,17 @@ function Stop-Listener([int]$Port) {
     ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 }
 
-function Start-AlgebriumTerminal([string]$Title, [string]$Directory, [string]$Command) {
-  Start-Process powershell -WorkingDirectory $Directory -ArgumentList @(
-    "-NoExit", "-Command", "`$Host.UI.RawUI.WindowTitle = '$Title'; $Command"
-  )
-}
-
 Stop-Listener 4097
 Stop-Listener 5173
 
-$database = Join-Path $root "data\algebrium.db"
-$providerConfig = Join-Path $root "config.json"
-$providerOverride = if ($Provider) { "`$env:ALGEBRIUM_PROVIDER = '$Provider'; " } else { "" }
-$backend = "$providerOverride`$env:ALGEBRIUM_KB_PATH = '$database'; `$env:QDRANT_URL = 'http://127.0.0.1:7333'; & '$bun' run algebrium -- --port 4097 --config '$providerConfig'"
-Start-AlgebriumTerminal "Algebrium Backend" (Join-Path $root "packages\opencode\packages\opencode") $backend
-Start-AlgebriumTerminal "Algebrium Frontend" (Join-Path $root "packages\desktop") "& '$bun' run dev"
+$backendLauncher = Join-Path $PSScriptRoot "run-algebrium-backend.cmd"
+$frontendLauncher = Join-Path $PSScriptRoot "run-algebrium-frontend.cmd"
+$providerArgument = if ($Provider) { $Provider } else { "-" }
+Start-Process -FilePath $backendLauncher -ArgumentList @("`"$providerArgument`"", "`"$bun`"")
+Start-Process -FilePath $frontendLauncher -ArgumentList "`"$bun`""
 
 Write-Host "Backend:  http://127.0.0.1:4097/health"
 Write-Host "Frontend: http://127.0.0.1:5173/"
 Write-Host "Qdrant:  http://127.0.0.1:7333/healthz"
+Write-Host "Search:   http://127.0.0.1:8088/search?format=json"
 Write-Host "Keep both Algebrium debug windows open. Closing a window stops its service."

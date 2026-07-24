@@ -3,11 +3,13 @@
 存放可复现的 Windows PowerShell 验证与维护脚本。脚本应避免依赖 Linux 命令，并记录退出码和结构化结果。
 # 本地调试脚本
 
-在 Windows PowerShell 中启动完整 Algebrium 调试环境：
+推荐通过 PowerShell 7 启动完整 Algebrium 调试环境：
 
-```powershell
-.\scripts\start-algebrium-dev.ps1
+```bat
+.\scripts\start-algebrium.cmd
 ```
+
+该入口固定使用 `pwsh.exe`，随后通过两个独立的 CMD 调试窗口运行后端和前端，避免 Windows PowerShell 5.1 及子 PowerShell 动态命令触发第三方 AMSI 模块崩溃。
 
 脚本会先显示 `config.json` 中的 Provider 列表和 `custom` 选项，可使用上下方向键选择、按 Enter 确认，然后安全输入该 Provider 的 API Key。选择 `custom` 时还会输入 OpenAI-compatible API base URL 和模型 ID。所有选择和密钥只在本次启动进程中生效，不会写回配置文件。脚本随后启动 SageMath 与 Qdrant Docker 服务，停止占用 Algebrium 调试端口的旧进程，并分别打开后端与前端终端窗口。前端地址为 `http://127.0.0.1:5173/`，后端健康检查为 `http://127.0.0.1:4097/health`，Qdrant 为 `http://127.0.0.1:7333/healthz`。
 

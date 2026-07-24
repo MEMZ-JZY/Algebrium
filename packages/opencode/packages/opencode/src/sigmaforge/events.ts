@@ -6,10 +6,13 @@ import type { TheoryNode } from "./theory"
 import type { KBSearchResult } from "./kb"
 import type { MistakeAttribution } from "./attribution"
 import type { LearningPathNode } from "./learning-path"
+import type { WebSearchResult } from "./web-search"
 
 export type StreamEvent =
   | { type: "chunk"; text: string }
-  | { type: "tool.start"; tool: string }
+  | { type: "reasoning.chunk"; text: string }
+  | { type: "answer"; text: string }
+  | { type: "tool.start"; tool: string; input?: unknown }
   | { type: "tool.result"; tool: string; result: CASResult }
   | { type: "tool.error"; tool: string; message: string }
   | { type: "artifact"; artifact: PlotArtifact }
@@ -19,6 +22,7 @@ export type StreamEvent =
   | { type: "kb.result"; entries: KBSearchResult[] }
   | { type: "mistake.attributed"; attribution: MistakeAttribution }
   | { type: "learning.path"; nodes: LearningPathNode[] }
+  | { type: "web.result"; result: WebSearchResult }
   | { type: "error"; message: string }
   | { type: "done"; context: ContextSnapshot }
 

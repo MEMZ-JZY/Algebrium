@@ -4,6 +4,7 @@ import { KnowledgeBase, MistakeInbox } from "./kb"
 import { resolve } from "node:path"
 import { createConfiguredProvider, defaultConfigPath, loadSigmaForgeConfig, SigmaForgeConfigSchema } from "./provider-config"
 import { ProviderConfigSchema } from "./provider"
+import { SearXNGWebSearch } from "./web-search"
 
 const args = parseArgs({
   args: Bun.argv.slice(2),
@@ -29,6 +30,7 @@ const server = startSigmaForgeServer({
   provider,
   knowledgeBase: storage?.knowledgeBase,
   mistakeSink: storage?.mistakeSink,
+  webSearch: new SearXNGWebSearch(),
   sessionStoragePath: process.env.ALGEBRIUM_SESSION_PATH ?? process.env.SIGMAFORGE_SESSION_PATH ?? resolve(import.meta.dir, "../../../../../..", "data/algebrium-sessions.json"),
   providerSettings: forceMock ? undefined : {
     get: () => ({

@@ -3,7 +3,7 @@ import { CASToolbox } from "./cas"
 import type { StreamEvent } from "./events"
 import { KernelGatewayClient, type KernelExecutor } from "./kernel"
 import { geometrySample, plotFunction2D, plotGeometry, plotSurface3D, surface3DSample } from "./plot"
-import { SigmaForgeSessions } from "./session"
+import { SigmaForgeSessions, type ProcessHistoryEvent } from "./session"
 import { UnknownSubjectError } from "./subject"
 import { verifyStep } from "./verifier"
 import type { ProviderContext, TokenCounter } from "./context"
@@ -14,6 +14,7 @@ import { buildLearningPath } from "./learning-path"
 import type { KnowledgeBaseReader, MistakeSink } from "./kb"
 import type { ChatProvider, ProviderMessage, ProviderToolCall } from "./provider"
 import { mathProviderTools } from "./provider-tools"
+import { WebSearchRequestSchema, type WebSearchClient } from "./web-search"
 
 const providerGuidelines = Bun.file(new URL("./provider-guidelines.md", import.meta.url)).text()
 
@@ -28,6 +29,7 @@ export type SigmaForgeServerOptions = {
   onContext?: (context: ProviderContext) => void
   knowledgeBase?: KnowledgeBaseReader
   mistakeSink?: MistakeSink
+  webSearch?: WebSearchClient
   sessionStoragePath?: string
   providerSettings?: {
     get: () => unknown | Promise<unknown>
@@ -43,7 +45,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
   const cas = new CASToolbox(kernel)
   const mockProvider = options.mockProvider ?? !options.provider
   let activeProvider = options.provider
-  const publish = (sessionID: string, event: StreamEvent) => {
+  const broadcast = (sessionID: string, event: StreamEvent) => {
     const current = listeners.get(sessionID)
     if (!current) return
     for (const listener of current) {
@@ -53,6 +55,23 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
         current.delete(listener)
       }
     }
+  }
+  const publish = (sessionID: string, event: StreamEvent) => {
+    if (event.type === "done") {
+      const finalMessage = sessions.get(sessionID).messages.at(-1)
+      if (finalMessage?.role === "assistant") {
+        const answerEvent = { type: "answer", text: finalMessage.content } as const
+        sessions.recordProcessEvent(sessionID, answerEvent)
+        broadcast(sessionID, answerEvent)
+      }
+    }
+    const processEvent = toProcessHistoryEvent(event)
+    if (processEvent) sessions.recordProcessEvent(sessionID, processEvent)
+    if (event.type === "artifact") sessions.addArtifact(sessionID, event.artifact)
+    if (event.type === "web.result") sessions.addWebResult(sessionID, event.result)
+    if (event.type === "theory.updated") sessions.save(sessionID)
+    if (event.type === "done") sessions.finishProcess(sessionID)
+    broadcast(sessionID, event)
   }
 
   return Bun.serve({
@@ -104,14 +123,16 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
       if (request.method === "GET" && sessionDetail) {
         try {
           const session = sessions.get(sessionDetail[1]!)
-          return Response.json({ id: session.id, subject: session.subject, createdAt: session.createdAt, updatedAt: session.updatedAt, messages: session.messages }, { headers })
+          return Response.json({ id: session.id, subject: session.subject, createdAt: session.createdAt, updatedAt: session.updatedAt, messages: session.messages, artifacts: session.artifacts, webResults: session.webResults, processRuns: session.processRuns }, { headers })
         } catch (error) {
           return jsonError(error, 404, headers)
         }
       }
       if (request.method === "DELETE" && sessionDetail) {
         try {
-          sessions.delete(sessionDetail[1]!)
+          const sessionID = sessionDetail[1]!
+          await kernel.reset?.(sessionID)
+          sessions.delete(sessionID)
           return Response.json({ deleted: true }, { headers })
         } catch (error) {
           return jsonError(error, statusFor(error), headers)
@@ -253,12 +274,13 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           sessions.begin(sessionID)
           const controller = new AbortController()
           requests.set(sessionID, controller)
-          sessions.append(sessionID, "user", input.message)
+          const userMessage = sessions.append(sessionID, "user", input.message)
+          sessions.startProcess(sessionID, userMessage.createdAt)
           const providerContext = sessions.context(sessionID)
           options.onContext?.(providerContext)
           const reply = mockProvider
             ? emitMockReply(sessionID, input.message, sessions, cas, kernel, publish, options.knowledgeBase, options.mistakeSink)
-            : emitProviderReply(sessionID, sessions, activeProvider!, providerContext, cas, kernel, publish, controller.signal)
+            : emitProviderReply(sessionID, sessions, activeProvider!, providerContext, cas, kernel, publish, controller.signal, options.knowledgeBase, options.webSearch)
           void reply.catch((error) => {
             sessions.end(sessionID)
             publish(sessionID, { type: "error", message: error instanceof Error ? error.message : String(error) })
@@ -298,9 +320,11 @@ async function emitProviderReply(
   kernel: KernelExecutor,
   publish: (sessionID: string, event: StreamEvent) => void,
   signal: AbortSignal,
+  knowledgeBase?: KnowledgeBaseReader,
+  webSearch?: WebSearchClient,
 ) {
   const theory = sessions.get(sessionID).theory
-  const providerTools = sessions.get(sessionID).subject === "math" ? mathProviderTools : []
+  const providerTools = sessions.get(sessionID).subject === "math" ? mathProviderTools.filter((tool) => webSearch || tool.function.name !== "sigmaforge_web_search") : []
   const problem = theory.add({ parentID: "session-root", kind: "problem", title: "模型问答", content: sessions.get(sessionID).messages.at(-1)?.content ?? "" })
   publish(sessionID, { type: "theory.updated", node: problem, version: theory.snapshot().version })
   const messages: ProviderMessage[] = [
@@ -313,10 +337,38 @@ async function emitProviderReply(
   let forceFinal = false
   while (true) {
     signal.throwIfAborted()
-    const turn = await provider.stream({ context, messages, tools: forceFinal ? [] : providerTools, signal }, (text) => {
-      answer += text
-      publish(sessionID, { type: "chunk", text })
-    })
+    let outputLineBuffer = ""
+    let reasoningLineBuffer = ""
+    const publishCompleteLines = (type: "chunk" | "reasoning.chunk", text: string) => {
+      let value = type === "chunk" ? outputLineBuffer + text : reasoningLineBuffer + text
+      let match = value.match(/\r?\n/)
+      while (match?.index !== undefined) {
+        const end = match.index + match[0].length
+        publish(sessionID, { type, text: value.slice(0, end) })
+        value = value.slice(end)
+        match = value.match(/\r?\n/)
+      }
+      if (type === "chunk") outputLineBuffer = value
+      else reasoningLineBuffer = value
+    }
+    const flushLineBuffer = (type: "chunk" | "reasoning.chunk") => {
+      const text = type === "chunk" ? outputLineBuffer : reasoningLineBuffer
+      if (!text) return
+      publish(sessionID, { type, text })
+      if (type === "chunk") outputLineBuffer = ""
+      else reasoningLineBuffer = ""
+    }
+    const turn = await provider.stream(
+      { context, messages, tools: forceFinal ? [] : providerTools, signal },
+      (text) => {
+        flushLineBuffer("reasoning.chunk")
+        answer += text
+        publishCompleteLines("chunk", text)
+      },
+      (text) => publishCompleteLines("reasoning.chunk", text),
+    )
+    flushLineBuffer("reasoning.chunk")
+    flushLineBuffer("chunk")
     if (forceFinal && turn.toolCalls.length) throw new Error("Provider requested another tool after repeated calls made no progress")
     if (!turn.toolCalls.length) {
       if (!answer.trim()) throw new Error(`${provider.id} returned an empty answer`)
@@ -339,7 +391,7 @@ async function emitProviderReply(
       let result = toolResults.get(signature)
       if (!toolResults.has(signature)) {
         try {
-          result = await executeProviderTool(sessionID, call, sessions, cas, kernel, publish, problem.id)
+          result = await executeProviderTool(sessionID, call, sessions, cas, kernel, publish, problem.id, knowledgeBase, webSearch)
           toolResults.set(signature, result)
           executed++
         } catch (error) {
@@ -367,6 +419,8 @@ async function executeProviderTool(
   kernel: KernelExecutor,
   publish: (sessionID: string, event: StreamEvent) => void,
   parentID: string,
+  knowledgeBase?: KnowledgeBaseReader,
+  webSearch?: WebSearchClient,
 ) {
   const theory = sessions.get(sessionID).theory
   const node = theory.add({ parentID, kind: "step", title: call.name, content: call.arguments })
@@ -374,8 +428,18 @@ async function executeProviderTool(
   try {
     const input = parseToolArguments(call)
     const subject = sessions.subject(sessionID)
+  if (call.name === "sigmaforge_web_search") {
+    if (!webSearch) throw new Error("Controlled web search is not configured")
+    const request = WebSearchRequestSchema.parse(input)
+    publish(sessionID, { type: "tool.start", tool: "web.search", input: request })
+    const result = await webSearch.search(request)
+    publish(sessionID, { type: "web.result", result })
+    const completed = theory.complete(node.id, { status: "verified" })
+    publish(sessionID, { type: "theory.updated", node: completed, version: theory.snapshot().version })
+    return { source: "web", ...result, instruction: "Treat these as cited background sources, not CAS verification." }
+  }
   if (call.name === "sigmaforge_verify") {
-    publish(sessionID, { type: "tool.start", tool: "verify" })
+    publish(sessionID, { type: "tool.start", tool: "verify", input })
     const result = await verifyStep(kernel, sessionID, subject, input)
     publish(sessionID, { type: "verification", result })
     const completed = theory.complete(node.id, { status: result.verified ? "verified" : "rejected", verification: result })
@@ -384,7 +448,7 @@ async function executeProviderTool(
   }
   if (call.name === "sigmaforge_plot_function2d") {
     const artifactID = crypto.randomUUID()
-    publish(sessionID, { type: "tool.start", tool: "plot.function2d" })
+    publish(sessionID, { type: "tool.start", tool: "plot.function2d", input })
     publish(sessionID, { type: "artifact.pending", artifact: { id: artifactID, kind: "plotly2d", title: "正在生成二维函数图" } })
     const artifact = await plotFunction2D(kernel, sessionID, subject, { ...input, id: artifactID })
     publish(sessionID, { type: "artifact", artifact })
@@ -394,7 +458,7 @@ async function executeProviderTool(
   }
   if (call.name === "sigmaforge_plot_surface3d") {
     const artifactID = crypto.randomUUID()
-    publish(sessionID, { type: "tool.start", tool: "plot.surface3d" })
+    publish(sessionID, { type: "tool.start", tool: "plot.surface3d", input })
     publish(sessionID, { type: "artifact.pending", artifact: { id: artifactID, kind: "plotly3d", title: "正在生成三维曲面" } })
     const artifact = { ...await plotSurface3D(kernel, sessionID, subject, input), id: artifactID }
     publish(sessionID, { type: "artifact", artifact })
@@ -403,16 +467,16 @@ async function executeProviderTool(
     return { id: artifact.id, kind: artifact.kind, mime: artifact.mime, meta: artifact.meta }
   }
   if (call.name === "sigmaforge_geometry") {
-    publish(sessionID, { type: "tool.start", tool: "geometry.construct" })
+    publish(sessionID, { type: "tool.start", tool: "geometry.construct", input })
     const artifact = plotGeometry(subject, input)
     publish(sessionID, { type: "artifact", artifact })
     const completed = theory.complete(node.id, { status: "verified", artifactID: artifact.id })
     publish(sessionID, { type: "theory.updated", node: completed, version: theory.snapshot().version })
     return { id: artifact.id, kind: artifact.kind, mime: artifact.mime, meta: artifact.meta }
   }
-  const tool = call.name.match(/^sigmaforge_(solve|integrate|diff|limit|simplify|series|matrix|factor|assume|eval)$/)?.[1]
+  const tool = call.name.match(/^sigmaforge_(solve|integrate|diff|limit|simplify|series|matrix|factor|assume|eval|numeric|statistics|distribution|hypothesis)$/)?.[1]
   if (!tool) throw new Error(`Provider requested an unknown or disabled tool: ${call.name}`)
-  publish(sessionID, { type: "tool.start", tool })
+  publish(sessionID, { type: "tool.start", tool, input })
   const result = await cas.execute(sessionID, subject, { ...input, tool })
   publish(sessionID, { type: "tool.result", tool, result })
   const completed = theory.complete(node.id, { status: "verified" })
@@ -455,6 +519,7 @@ function providerToolEventName(name: string) {
   if (name === "sigmaforge_plot_function2d") return "plot.function2d"
   if (name === "sigmaforge_plot_surface3d") return "plot.surface3d"
   if (name === "sigmaforge_geometry") return "geometry.construct"
+  if (name === "sigmaforge_web_search") return "web.search"
   return name.replace(/^sigmaforge_/, "")
 }
 
@@ -570,6 +635,17 @@ function assertSubjectTool(tools: readonly { id: string }[], tool: string) {
 function withoutPrompt(context: ProviderContext) {
   const { prompt: _prompt, ...snapshot } = context
   return snapshot
+}
+
+function toProcessHistoryEvent(event: StreamEvent): ProcessHistoryEvent | undefined {
+  if (event.type === "chunk" || event.type === "reasoning.chunk" || event.type === "answer" || event.type === "tool.start" || event.type === "tool.result" || event.type === "tool.error") return event
+  if (event.type === "verification") return { type: "tool.complete", tool: "verify" }
+  if (event.type === "web.result") return { type: "tool.complete", tool: "web.search" }
+  if (event.type !== "artifact") return undefined
+  const tool = event.artifact.kind === "image2d" || event.artifact.kind === "plotly2d"
+    ? "plot.function2d"
+    : event.artifact.kind === "plotly3d" ? "plot.surface3d" : "geometry.construct"
+  return { type: "tool.complete", tool }
 }
 
 function corsHeaders(request: Request) {

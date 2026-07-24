@@ -106,6 +106,20 @@ test("parses chunks split across transport boundaries", async () => {
   expect(await consumeOpenAIStream(body, () => {})).toEqual({ content: "完成", toolCalls: [] })
 })
 
+test("streams provider reasoning separately from answer text", async () => {
+  const body = new Response([
+    'data: {"choices":[{"delta":{"reasoning_content":"先分析"}}]}',
+    'data: {"choices":[{"delta":{"content":"最终答案"}}]}',
+    "data: [DONE]",
+    "",
+  ].join("\n\n")).body!
+  const chunks: string[] = []
+  const reasoning: string[] = []
+  expect(await consumeOpenAIStream(body, (text) => chunks.push(text), (text) => reasoning.push(text))).toEqual({ content: "最终答案", toolCalls: [] })
+  expect(chunks).toEqual(["最终答案"])
+  expect(reasoning).toEqual(["先分析"])
+})
+
 test("assembles streamed tool call arguments", async () => {
   const body = new Response([
     'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"sigmaforge_integrate","arguments":"{\\\"expression\\\":\\\"x*"}}]}}]}',
@@ -114,6 +128,21 @@ test("assembles streamed tool call arguments", async () => {
     "",
   ].join("\n\n")).body!
   expect(await consumeOpenAIStream(body, () => {})).toEqual({ content: "", toolCalls: [{ id: "call_1", name: "sigmaforge_integrate", arguments: '{"expression":"x*e^x","variable":"x"}' }] })
+})
+
+test("converts streamed DSML tool calls without exposing protocol text", async () => {
+  const chunks: string[] = []
+  const body = new Response([
+    'data: {"choices":[{"delta":{"content":"<|DS"}}]}',
+    'data: {"choices":[{"delta":{"content":"ML|tool_calls><|DSML|invoke name=\\"sigmaforge_eval\\"><|DSML|parameter name=\\"expression\\" string=\\"true\\">sinh(x)<|DSML|parameter><|DSML|invoke><|DSML|tool_calls>"}}]}',
+    "data: [DONE]",
+    "",
+  ].join("\n\n")).body!
+  expect(await consumeOpenAIStream(body, (text) => chunks.push(text))).toEqual({
+    content: "",
+    toolCalls: [{ id: "dsml_0", name: "sigmaforge_eval", arguments: '{"expression":"sinh(x)"}' }],
+  })
+  expect(chunks).toEqual([])
 })
 
 test("accepts empty usage chunks and a final event without a newline", async () => {

@@ -3,7 +3,7 @@ import { ContextBuilder, type TokenCounter } from "@/sigmaforge/context"
 import type { SigmaForgeMessage } from "@/sigmaforge/session"
 import { SigmaForgeSessions } from "@/sigmaforge/session"
 import { TheoryTreeStore } from "@/sigmaforge/theory"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -59,9 +59,57 @@ test("restores persisted session history", () => {
   const session = first.create()
   first.append(session.id, "user", "连续对话问题")
   first.append(session.id, "assistant", "连续对话回答")
+  const user = first.append(session.id, "user", "需要保留过程的问题")
+  first.startProcess(session.id, user.createdAt)
+  first.recordProcessEvent(session.id, { type: "reasoning.chunk", text: "先分析条件。" })
+  first.recordProcessEvent(session.id, { type: "tool.start", tool: "cas.simplify", input: { expression: "x+x" } })
+  first.recordProcessEvent(session.id, { type: "tool.complete", tool: "cas.simplify" })
+  first.recordProcessEvent(session.id, { type: "answer", text: "完整解答" })
+  first.finishProcess(session.id)
+  const step = session.theory.add({ parentID: "session-root", kind: "step", title: "验证步骤", content: "验证内容" })
+  session.theory.complete(step.id, { status: "verified" })
+  first.save(session.id)
+  first.addArtifact(session.id, { id: "plot", kind: "plotly2d", mime: "application/json", data: {}, meta: { expression: "x" } })
   const restored = new SigmaForgeSessions(undefined, undefined, undefined, path)
-  expect(restored.get(session.id).messages.map((message) => message.content)).toEqual(["连续对话问题", "连续对话回答"])
+  expect(restored.get(session.id).messages.map((message) => message.content)).toEqual(["连续对话问题", "连续对话回答", "需要保留过程的问题"])
+  expect(restored.get(session.id).processRuns).toEqual([expect.objectContaining({
+    userMessageCreatedAt: user.createdAt,
+    completed: true,
+    events: [
+      { type: "reasoning.chunk", text: "先分析条件。" },
+      { type: "tool.start", tool: "cas.simplify", input: { expression: "x+x" } },
+      { type: "tool.complete", tool: "cas.simplify" },
+      { type: "answer", text: "完整解答" },
+    ],
+  })])
+  expect(restored.get(session.id).theory.snapshot().nodes[step.id]?.status).toBe("verified")
+  expect(restored.get(session.id).artifacts.map((artifact) => artifact.id)).toEqual(["plot"])
   expect(restored.list()[0]?.id).toBe(session.id)
+})
+
+test("backs up damaged session history and starts empty", () => {
+  const directory = mkdtempSync(join(tmpdir(), "sigmaforge-corrupt-"))
+  const path = join(directory, "sessions.json")
+  writeFileSync(path, "{not-json", "utf8")
+  const sessions = new SigmaForgeSessions(undefined, undefined, undefined, path)
+  expect(sessions.list()).toHaveLength(0)
+  expect(readdirSync(directory).some((name) => name.startsWith("sessions.json.corrupt-"))).toBe(true)
+})
+
+test("ignores malformed persisted artifacts and web results", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "sigmaforge-invalid-artifacts-")), "sessions.json")
+  const first = new SigmaForgeSessions(undefined, undefined, undefined, path)
+  const session = first.create()
+  first.addArtifact(session.id, { id: "plot", kind: "plotly2d", mime: "application/json", data: {}, meta: { expression: "x" } })
+  first.addWebResult(session.id, { query: "gamma", sources: [{ title: "DLMF", url: "https://dlmf.nist.gov/5.2", domain: "dlmf.nist.gov", snippet: "Definition" }] })
+  const persisted = JSON.parse(readFileSync(path, "utf8")) as Array<Record<string, unknown>>
+  persisted[0]!.artifacts = [{ id: "broken" }]
+  persisted[0]!.webResults = [{ query: "gamma", sources: [{}] }]
+  writeFileSync(path, JSON.stringify(persisted), "utf8")
+
+  const restored = new SigmaForgeSessions(undefined, undefined, undefined, path)
+  expect(restored.get(session.id).artifacts).toEqual([])
+  expect(restored.get(session.id).webResults).toEqual([])
 })
 
 test("deletes persisted session history", () => {

@@ -15,7 +15,8 @@
     "dev": "bun run --conditions=browser ./src/index.ts",
     "dev:temporary": "bun run --conditions=browser ./src/temporary.ts",
     "sigmaforge": "bun run --conditions=browser ./src/sigmaforge/cli.ts",
-    "sigmaforge:cli": "bun run --conditions=browser ./src/sigmaforge/terminal-cli.ts"
+    "sigmaforge:cli": "bun run --conditions=browser ./src/sigmaforge/terminal-cli.ts",
+    "sigmaforge:eval": "bun test --timeout 30000 test/sigmaforge/math-evaluation.test.ts"
     ,"algebrium": "bun run --conditions=browser ./src/sigmaforge/cli.ts"
     ,"algebrium:cli": "bun run --conditions=browser ./src/sigmaforge/terminal-cli.ts"
   },

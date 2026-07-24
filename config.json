@@ -5,9 +5,9 @@
     "profiles": {
       "deepseek": {
         "provider": "deepseek",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4-pro",
         "apiKeyEnv": "DEEPSEEK_API_KEY",
-        "maxTokens": 4096,
+        "maxTokens": 200000,
         "timeoutMs": 120000,
         "headers": {},
         "extraBody": {}
@@ -16,7 +16,7 @@
         "provider": "mimo",
         "model": "mimo-v2.5-pro",
         "apiKeyEnv": "MIMO_API_KEY",
-        "maxTokens": 4096,
+        "maxTokens": 200000,
         "timeoutMs": 120000,
         "headers": {},
         "extraBody": {}
@@ -25,7 +25,7 @@
         "provider": "kimi",
         "model": "kimi-k2.7",
         "apiKeyEnv": "KIMI_API_KEY",
-        "maxTokens": 4096,
+        "maxTokens": 200000,
         "timeoutMs": 120000,
         "headers": {},
         "extraBody": {}
@@ -34,7 +34,7 @@
         "provider": "volcengine",
         "model": "YOUR_ARK_ENDPOINT_OR_MODEL_ID",
         "apiKeyEnv": "ARK_API_KEY",
-        "maxTokens": 4096,
+        "maxTokens": 200000,
         "timeoutMs": 120000,
         "headers": {},
         "extraBody": {}
@@ -43,7 +43,7 @@
         "provider": "openrouter",
         "model": "deepseek/deepseek-chat",
         "apiKeyEnv": "OPENROUTER_API_KEY",
-        "maxTokens": 4096,
+        "maxTokens": 200000,
         "timeoutMs": 120000,
         "headers": {
           "HTTP-Referer": "http://localhost",
@@ -55,7 +55,7 @@
         "provider": "siliconflow",
         "model": "deepseek-ai/DeepSeek-V3.2",
         "apiKeyEnv": "SILICONFLOW_API_KEY",
-        "maxTokens": 4096,
+        "maxTokens": 200000,
         "timeoutMs": 120000,
         "headers": {},
         "extraBody": {}

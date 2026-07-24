@@ -1,7 +1,9 @@
-const forbidden = /(?:__|\b(?:import|exec|eval|open|compile|globals|locals|os|sys|subprocess|socket|requests|urllib|pathlib|shutil|builtins)\b|[;{}\[\]`'"\\])/i
-const allowed = /^[\p{L}\p{N}\s+\-*/^().,=<>!]+$/u
-const allowedFunctions = new Set(["abs", "arccos", "arcsin", "arctan", "cos", "diff", "exp", "factor", "integral", "limit", "log", "sin", "sqrt", "subs", "tan"])
-const sageConstants = new Set(["e", "pi", "I", "infinity", "NaN"])
+const forbidden = /(?:__|\b(?:import|exec|eval|open|compile|globals|locals|os|sys|subprocess|socket|requests|urllib|pathlib|shutil|builtins)\b|[;{}`'"\\])/i
+const allowed = /^[\p{L}\p{N}\s_+\-*/^().,=<>!\[\]]+$/u
+const allowedFunctions = new Set([
+  "abs", "acosh", "arccos", "arcsin", "arctan", "arg", "atanh", "airy_ai", "airy_bi", "beta", "bernoulli", "bessel_J", "binomial", "ceil", "chebyshev_T", "Ci", "conjugate", "cos", "cosh", "cos_integral", "cot", "csc", "dickman_rho", "diff", "dilog", "dirac_delta", "divisors", "elliptic_kc", "euler_phi", "Ei", "elliptic_k", "erf", "erfc", "exp", "exp_integral_e", "factor", "factorial", "fibonacci", "floor", "fresnel_sin", "gamma", "gamma_inc", "gcd", "heaviside", "hermite", "hypergeometric", "imag", "integral", "is_prime", "jacobi_P", "kronecker_delta", "laguerre", "lambert_w", "legendre_P", "lcm", "limit", "log", "log10", "log_gamma", "max", "min", "moebius", "mod", "next_prime", "polylog", "prime_pi", "product", "real", "round", "sec", "Si", "sign", "sigma", "sin", "sin_integral", "sinh", "sqrt", "subs", "sum", "tan", "tanh", "trunc", "zeta",
+])
+const sageConstants = new Set(["catalan", "e", "euler_gamma", "golden_ratio", "I", "infinity", "NaN", "oo", "pi"])
 
 export function requireMathExpression(value: string) {
   const expression = normalizeMathExpression(value)
@@ -43,6 +45,15 @@ export function normalizeMathExpression(value: string) {
   }
   expression = expression.replace(/\{/g, "(").replace(/\}/g, ")").trim()
   return rewriteFunctionAlias(expression)
+    .replace(/\bAiryAi\s*\(/g, "airy_ai(")
+    .replace(/\bAiryBi\s*\(/g, "airy_bi(")
+    .replace(/\blngamma\s*\(/g, "log_gamma(")
+}
+
+export function requireEvaluableMathExpression(value: string) {
+  const expression = normalizeMathExpression(value)
+  const definition = expression.match(/^[A-Za-z][A-Za-z0-9_]*\s*\(\s*[A-Za-z][A-Za-z0-9_]*\s*\)\s*=\s*(.+)$/)
+  return requireMathExpression(definition?.[1] ?? expression)
 }
 
 function rewriteFunctionAlias(expression: string): string {

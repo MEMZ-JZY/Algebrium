@@ -27,8 +27,10 @@ export type TheoryTree = {
 export class TheoryTreeStore {
   private readonly tree: TheoryTree
 
-  constructor(sessionID: string) {
-    this.tree = { sessionID, version: 0, nodes: {} }
+  constructor(sessionID: string, snapshot?: TheoryTree) {
+    this.tree = snapshot
+      ? structuredClone({ ...snapshot, sessionID })
+      : { sessionID, version: 0, nodes: {} }
   }
 
   snapshot(): TheoryTree {

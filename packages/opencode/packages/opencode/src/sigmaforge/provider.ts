@@ -9,7 +9,7 @@ export const ProviderConfigSchema = z.object({
   apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
   baseURL: z.string().url().optional(),
   temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().positive().max(131072).default(4096),
+  maxTokens: z.number().int().positive().max(200000).default(4096),
   timeoutMs: z.number().int().min(1000).max(600000).default(120000),
   headers: z.record(z.string(), z.string()).default({}),
   extraBody: z.record(z.string(), z.unknown()).default({}),
@@ -35,7 +35,7 @@ export type ProviderTurn = { content: string; toolCalls: ProviderToolCall[] }
 export interface ChatProvider {
   readonly id: string
   readonly model: string
-  stream(request: ProviderRequest, onChunk: (text: string) => void): Promise<ProviderTurn>
+  stream(request: ProviderRequest, onChunk: (text: string) => void, onReasoning?: (text: string) => void): Promise<ProviderTurn>
 }
 
 const baseURLs: Record<z.infer<typeof ProviderIDSchema>, string | undefined> = {
@@ -62,7 +62,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.baseURL = (config.baseURL ?? baseURLs[config.provider])!.replace(/\/$/, "")
   }
 
-  async stream(request: ProviderRequest, onChunk: (text: string) => void) {
+  async stream(request: ProviderRequest, onChunk: (text: string) => void, onReasoning?: (text: string) => void) {
     const response = await fetch(`${this.baseURL}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}`, ...this.config.headers },
@@ -81,16 +81,19 @@ export class OpenAICompatibleProvider implements ChatProvider {
     })
     if (!response.ok) throw await providerError(response, this.id)
     if (!response.body) throw new Error(`${this.id} returned an empty response stream`)
-    return consumeOpenAIStream(response.body, onChunk)
+    return consumeOpenAIStream(response.body, onChunk, onReasoning)
   }
 }
 
-export async function consumeOpenAIStream(body: ReadableStream<Uint8Array>, onChunk: (text: string) => void) {
+export async function consumeOpenAIStream(body: ReadableStream<Uint8Array>, onChunk: (text: string) => void, onReasoning: (text: string) => void = () => {}) {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   const toolCalls = new Map<number, ProviderToolCall>()
   let buffer = ""
+  let rawResult = ""
   let result = ""
+  let visiblePending = ""
+  let sawDsmlToolCalls = false
   while (true) {
     const next = await reader.read()
     buffer += decoder.decode(next.value ?? new Uint8Array(), { stream: !next.done })
@@ -107,10 +110,33 @@ export async function consumeOpenAIStream(body: ReadableStream<Uint8Array>, onCh
       const chunk = streamChunkSchema.parse(JSON.parse(data))
       const delta = chunk.choices[0]?.delta
       if (!delta) continue
+      const reasoning = delta.reasoning_content ?? ""
+      if (reasoning) onReasoning(reasoning)
       const text = delta.content ?? ""
       if (text) {
-        result += text
-        onChunk(text)
+        rawResult += text
+        if (!sawDsmlToolCalls) {
+          const visible = visiblePending + text
+          const marker = "<|DSML|"
+          const markerIndex = visible.indexOf(marker)
+          if (markerIndex >= 0) {
+            const prefix = visible.slice(0, markerIndex)
+            if (prefix) {
+              result += prefix
+              onChunk(prefix)
+            }
+            visiblePending = ""
+            sawDsmlToolCalls = true
+          } else {
+            const pendingLength = trailingPrefixLength(visible, marker)
+            const prefix = visible.slice(0, visible.length - pendingLength)
+            if (prefix) {
+              result += prefix
+              onChunk(prefix)
+            }
+            visiblePending = visible.slice(visible.length - pendingLength)
+          }
+        }
       }
       delta.tool_calls?.forEach((call) => {
         const current = toolCalls.get(call.index) ?? { id: "", name: "", arguments: "" }
@@ -121,14 +147,45 @@ export async function consumeOpenAIStream(body: ReadableStream<Uint8Array>, onCh
         })
       })
     }
-    if (next.done) return { content: result, toolCalls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => call) }
+    if (next.done) {
+      if (visiblePending) {
+        result += visiblePending
+        onChunk(visiblePending)
+      }
+      const dsmlToolCalls = sawDsmlToolCalls ? parseDsmlToolCalls(rawResult) : []
+      return { content: result, toolCalls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => call).concat(dsmlToolCalls) }
+    }
   }
+}
+
+function trailingPrefixLength(value: string, prefix: string) {
+  for (let length = Math.min(value.length, prefix.length - 1); length > 0; length--) {
+    if (value.endsWith(prefix.slice(0, length))) return length
+  }
+  return 0
+}
+
+function parseDsmlToolCalls(content: string): ProviderToolCall[] {
+  const calls: ProviderToolCall[] = []
+  const invoke = /<\|DSML\|invoke\s+name="([A-Za-z][A-Za-z0-9_]*)">([\s\S]*?)<\|DSML\|invoke>/g
+  for (const match of content.matchAll(invoke)) {
+    const parameters: Record<string, string> = {}
+    const parameter = /<\|DSML\|parameter\s+name="([A-Za-z][A-Za-z0-9_]*)"(?:\s+string="true")?>([\s\S]*?)<\|DSML\|parameter>/g
+    for (const item of match[2]!.matchAll(parameter)) parameters[item[1]!] = decodeDsmlText(item[2]!)
+    calls.push({ id: `dsml_${calls.length}`, name: match[1]!, arguments: JSON.stringify(parameters) })
+  }
+  return calls
+}
+
+function decodeDsmlText(value: string) {
+  return value.trim().replace(/&(amp|gt|lt|quot|apos);/g, (_match, entity: string) => ({ amp: "&", gt: ">", lt: "<", quot: '"', apos: "'" })[entity]!)
 }
 
 const streamChunkSchema = z.object({
   choices: z.array(z.object({
     delta: z.object({
       content: z.string().nullable().optional(),
+      reasoning_content: z.string().nullable().optional(),
       tool_calls: z.array(z.object({
         index: z.number().int().nonnegative(),
         id: z.string().optional(),

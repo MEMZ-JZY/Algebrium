@@ -2,15 +2,22 @@ import DOMPurify from "dompurify"
 import katex from "katex"
 import { marked } from "marked"
 import type Plotly from "plotly.js-basic-dist-min"
-import { FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react"
-import { askSigmaForge, createSession, deleteSession, getProviderSettings, getSession, getTheory, listSessions, stopSigmaForge, updateProviderSettings, uploadSessionFile, type CASResult, type ContextSnapshot, type PlotArtifact, type ProviderSettings, type Session, type SessionMessage, type StreamEvent, type TheoryNode, type VerificationResult } from "./api"
+import { type CSSProperties, FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react"
+import { askSigmaForge, createSession, deleteSession, getHealth, getProviderSettings, getSession, getTheory, listSessions, stopSigmaForge, updateProviderSettings, uploadSessionFile, type CASResult, type ContextSnapshot, type PlotArtifact, type ProcessHistoryEvent, type ProcessHistoryRun, type ProviderSettings, type Session, type SessionMessage, type StreamEvent, type TheoryNode, type VerificationResult, type WebSearchResult } from "./api"
+import { citationURL } from "./web-sources"
 import "katex/dist/katex.min.css"
 
 type ArtifactState = { id: string; title: string; status: "pending" | "ready" | "error"; artifact?: PlotArtifact; error?: string }
-type ToolActivity = { id: string; tool: string; status: "running" | "complete" | "error"; startedAt: number; result?: CASResult; error?: string }
+type ToolActivity = { id: string; tool: string; status: "running" | "complete" | "error"; startedAt: number; input?: unknown; result?: CASResult; error?: string }
+type ProcessStep =
+  | { id: string; kind: "assistant"; lines: string[] }
+  | { id: string; kind: "reasoning"; content: string }
+  | { id: string; kind: "tools"; activities: ToolActivity[] }
+type ProcessRun = { id: string; userMessageCreatedAt: number; steps: ProcessStep[]; completed: boolean; finalAnswer?: string }
 type ColorScheme = "light" | "dark"
 type ThemePreference = "system" | ColorScheme
 type Language = "zh" | "en"
+type ConnectionStatus = "checking" | "connected" | "disconnected"
 
 const quickPrompts = [
   { label: "求解方程", prompt: "求解方程 x^3 - 6x^2 + 11x - 6 = 0，并验证所有解。" },
@@ -32,9 +39,10 @@ export function App() {
   const session = useRef<string | undefined>(undefined)
   const [question, setQuestion] = useState("")
   const [answer, setAnswer] = useState("")
-  const [tools, setTools] = useState<ToolActivity[]>([])
+  const [processRuns, setProcessRuns] = useState<ProcessRun[]>([])
   const [verifications, setVerifications] = useState<VerificationResult[]>([])
   const [artifacts, setArtifacts] = useState<ArtifactState[]>([])
+  const [webResults, setWebResults] = useState<WebSearchResult[]>([])
   const [theory, setTheory] = useState<Record<string, TheoryNode>>({})
   const [selected, setSelected] = useState<string>()
   const [context, setContext] = useState<ContextSnapshot>()
@@ -47,22 +55,46 @@ export function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
   const [newMessageAt, setNewMessageAt] = useState<number>()
+  const [revealingRunID, setRevealingRunID] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [connection, setConnection] = useState<ConnectionStatus>("checking")
   const [theme, setTheme] = useState<ThemePreference>(() => readPreference("algebrium-theme", "system"))
   const [language, setLanguage] = useState<Language>(() => readPreference("algebrium-language", "zh"))
   const colorScheme = useColorScheme(theme)
   const text = uiText[language]
   const messagesEnd = useRef<HTMLDivElement>(null)
+  const conversation = useRef<HTMLElement>(null)
+  const stickToBottom = useRef(true)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const questionInput = useRef<HTMLTextAreaElement>(null)
 
+  useEffect(() => {
+    let active = true
+    const checkConnection = async () => {
+      try {
+        await getHealth()
+        if (active) setConnection("connected")
+      } catch {
+        if (active) setConnection("disconnected")
+      }
+    }
+    void checkConnection()
+    const interval = window.setInterval(() => void checkConnection(), 10_000)
+    return () => { active = false; window.clearInterval(interval) }
+  }, [])
   useEffect(() => { void refreshSessions() }, [])
   useEffect(() => { localStorage.setItem("algebrium-theme", theme); document.documentElement.dataset.theme = theme === "system" ? "" : theme }, [theme])
   useEffect(() => { localStorage.setItem("algebrium-language", language); document.documentElement.lang = language === "zh" ? "zh-CN" : "en" }, [language])
   useEffect(() => { if (!loading) setStopping(false) }, [loading])
-  useEffect(() => { messagesEnd.current?.scrollIntoView({ behavior: loading ? "auto" : "smooth" }) }, [history, answer, loading])
+  useEffect(() => { if (stickToBottom.current) messagesEnd.current?.scrollIntoView({ behavior: loading ? "auto" : "smooth" }) }, [history, answer, loading, processRuns])
 
   async function refreshSessions() {
-    try { setSessions(await listSessions()) } catch { /* backend status is reported when sending */ }
+    try {
+      setSessions(await listSessions())
+      setConnection("connected")
+    } catch {
+      setConnection("disconnected")
+    }
   }
 
   async function selectSession(id: string) {
@@ -71,6 +103,9 @@ export function App() {
     resetTransientState()
     const detail = await getSession(id)
     setHistory(detail.messages)
+    setProcessRuns(restoreProcessRuns(detail.processRuns))
+    setArtifacts(detail.artifacts.map((artifact) => ({ id: artifact.id, title: String(artifact.meta.expression ?? "交互图形"), status: "ready", artifact })))
+    setWebResults(detail.webResults)
     setTheory((await getTheory(id)).nodes)
   }
 
@@ -85,14 +120,16 @@ export function App() {
 
   function resetTransientState() {
     setAnswer("")
-    setTools([])
+    setProcessRuns([])
     setVerifications([])
     setArtifacts([])
+    setWebResults([])
     setSelected(undefined)
     setContext(undefined)
     setError("")
     setStopping(false)
     setNewMessageAt(undefined)
+    setRevealingRunID(undefined)
   }
 
   function useQuickPrompt(prompt: string) {
@@ -113,25 +150,35 @@ export function App() {
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!question.trim() || loading) return
+    const message = question.trim()
+    if (!message || loading || connection !== "connected") return
     setAnswer("")
-    setTools([])
     setVerifications([])
     setContext(undefined)
     setError("")
     setLoading(true)
+    setQuestion("")
     try {
       session.current ??= (await createSession()).id
       const createdAt = Date.now()
+      const processID = crypto.randomUUID()
       setNewMessageAt(createdAt)
-      setHistory((current) => [...current, { role: "user", content: question, createdAt }])
-      await askSigmaForge(session.current, question, applyEvent)
+      setRevealingRunID(processID)
+      setHistory((current) => [...current, { role: "user", content: message, createdAt }])
+      setProcessRuns((current) => [...current, { id: processID, userMessageCreatedAt: createdAt, steps: [], completed: false }])
+      stickToBottom.current = true
+      setShowScrollToBottom(false)
+      await askSigmaForge(session.current, message, applyEvent)
       setTheory((await getTheory(session.current)).nodes)
-      setHistory((await getSession(session.current)).messages)
+      const detail = await getSession(session.current)
+      setHistory(detail.messages)
+      setProcessRuns((current) => reconcileProcessRuns(current, detail.processRuns))
       setAnswer("")
       await refreshSessions()
     } catch (cause) {
+      setQuestion(message)
       setError(cause instanceof Error ? cause.message : String(cause))
+      setProcessRuns((current) => completeActiveProcessRun(current))
     } finally {
       setLoading(false)
     }
@@ -166,21 +213,35 @@ export function App() {
   }
 
   function applyEvent(event: StreamEvent) {
-    if (event.type === "chunk") setAnswer((current) => current + event.text)
-    if (event.type === "tool.start") setTools((current) => [...current, { id: crypto.randomUUID(), tool: event.tool, status: "running", startedAt: Date.now() }])
-    if (event.type === "tool.result") setTools((current) => completeTool(current, event.tool, event.result))
+    if (event.type === "chunk") {
+      setAnswer((current) => current + event.text)
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => appendProcessText(steps, "assistant", event.text)))
+    }
+    if (event.type === "reasoning.chunk") setProcessRuns((current) => updateActiveProcessRun(current, (steps) => appendProcessText(steps, "reasoning", event.text)))
+    if (event.type === "answer") setProcessRuns((current) => updateActiveProcessAnswer(current, event.text))
+    if (event.type === "tool.start") {
+      const activity: ToolActivity = { id: crypto.randomUUID(), tool: event.tool, status: "running", startedAt: Date.now(), input: event.input }
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => appendProcessTool(steps, activity)))
+    }
+    if (event.type === "tool.result") {
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => completeProcessTool(steps, event.tool, event.result)))
+    }
     if (event.type === "tool.error") {
-      setTools((current) => completeTool(current, event.tool, undefined, event.message))
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => completeProcessTool(steps, event.tool, undefined, event.message)))
       if (event.tool.startsWith("plot.")) setArtifacts((current) => current.map((item) => item.status === "pending" ? { ...item, status: "error", error: event.message } : item))
     }
     if (event.type === "verification") {
       setVerifications((current) => [...current, event.result])
-      setTools((current) => completeTool(current, "verify"))
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => completeProcessTool(steps, "verify")))
     }
     if (event.type === "artifact.pending") setArtifacts((current) => [...current.filter((item) => item.id !== event.artifact.id), { ...event.artifact, status: "pending" }])
     if (event.type === "artifact") {
       setArtifacts((current) => [...current.filter((item) => item.id !== event.artifact.id), { id: event.artifact.id, title: String(event.artifact.meta.expression ?? "交互图形"), status: "ready", artifact: event.artifact }])
-      setTools((current) => completeTool(current, artifactTool(event.artifact)))
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => completeProcessTool(steps, artifactTool(event.artifact))))
+    }
+    if (event.type === "web.result") {
+      setWebResults((current) => [...current, event.result])
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => completeProcessTool(steps, "web.search")))
     }
     if (event.type === "theory.updated") {
       setTheory((current) => ({ ...current, [event.node.id]: event.node }))
@@ -189,10 +250,27 @@ export function App() {
     }
     if (event.type === "error") {
       setError(event.message)
-      setTools((current) => current.map((item) => item.status === "running" ? { ...item, status: "complete" } : item))
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => steps.map((step) => step.kind === "tools" ? { ...step, activities: step.activities.map((item) => item.status === "running" ? { ...item, status: "complete" } : item) } : step)))
       setArtifacts((current) => current.map((item) => item.status === "pending" ? { ...item, status: "error", error: event.message } : item))
     }
-    if (event.type === "done") setContext(event.context)
+    if (event.type === "done") {
+      setContext(event.context)
+      setProcessRuns((current) => completeActiveProcessRun(current))
+    }
+  }
+
+  function handleConversationScroll() {
+    const element = conversation.current
+    if (!element) return
+    const awayFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight > 120
+    stickToBottom.current = !awayFromBottom
+    setShowScrollToBottom(awayFromBottom)
+  }
+
+  function scrollToBottom() {
+    stickToBottom.current = true
+    setShowScrollToBottom(false)
+    messagesEnd.current?.scrollIntoView({ behavior: "smooth" })
   }
 
   return <main className={`app-shell ${leftCollapsed ? "left-collapsed" : ""} ${rightCollapsed ? "right-collapsed" : ""}`}>
@@ -203,7 +281,7 @@ export function App() {
         <div className="sidebar-label">{text.history}</div>
         <div className="session-list">{sessions.map((item) => <div className={`session-item ${session.current === item.id ? "selected" : ""}`} key={item.id}><button type="button" className="session-open" onClick={() => void selectSession(item.id)}><strong>{item.title}</strong><small>{item.updatedAt ? new Date(item.updatedAt).toLocaleString() : ""}</small></button><button type="button" className="session-delete" aria-label={`删除会话 ${item.title}`} title="删除会话" onClick={() => void removeSession(item.id)}>×</button></div>)}</div>
       </div>
-      <div className="sidebar-foot"><span className="status-dot" /><span className="sidebar-status-label">{text.connected}</span></div>
+      <div className={`sidebar-foot ${connection}`}><span className="status-dot" /><span className="sidebar-status-label">{connection === "connected" ? text.connected : connection === "checking" ? (language === "zh" ? "正在连接本地服务" : "Connecting to local service") : (language === "zh" ? "本地服务未连接" : "Local service disconnected")}</span></div>
     </aside>
 
     <section className="chat-column">
@@ -211,19 +289,24 @@ export function App() {
         <div><h1>{text.title}</h1><p>{text.subtitle}</p></div>
         <button type="button" className="settings-button" onClick={() => setSettingsOpen(true)} aria-label={text.settings} title={text.settings}><SettingsGlyph /></button>
       </header>
-      <article className="conversation" aria-live="polite">
+      <article ref={conversation} className="conversation" aria-live="polite" onScroll={handleConversationScroll}>
         {!history.length && !answer && <div className="empty-state"><div className="empty-sigma"><img src="/icon-192.png" alt="Algebrium" /></div><h2>{text.emptyTitle}</h2><p>{text.emptyBody}</p><div className="prompt-suggestions" aria-label={text.examples}>{quickPrompts.map((item, index) => <button type="button" key={item.label} onClick={() => useQuickPrompt(language === "zh" ? item.prompt : quickPromptsEn[index]!.prompt)}>{language === "zh" ? item.label : quickPromptsEn[index]!.label}<span aria-hidden="true">↗</span></button>)}</div></div>}
-        {history.map((message, index) => <div className={`message-row ${message.role} ${message.createdAt === newMessageAt ? "message-entering" : ""}`} key={`${message.createdAt}-${index}`}><div className="avatar">{message.role === "user" ? text.you.slice(0, 1) : "A"}</div><div className="message"><span>{message.role === "user" ? text.you : "Algebrium"}</span><RenderBuffer content={message.content} /></div></div>)}
-        {answer && <div className="message-row assistant message-entering"><div className="avatar">A</div><div className="message streaming"><span>Algebrium</span><RenderBuffer content={answer} /></div></div>}
-        <div className="activity-stack">{tools.length > 0 && <ToolActivityGroup activities={tools} language={language} />}{verifications.map((verification, index) => <VerificationCard key={index} verification={verification} language={language} />)}{error && <p className="error">{error}</p>}{context && <small className="context">{text.context} {context.estimatedTokens}/{context.budget} tokens{context.compressed ? ` · ${text.compressed}` : ""}</small>}</div>
+        {history.map((message, index) => {
+          const run = message.role === "assistant" ? processRunForAssistant(history, index, processRuns) : undefined
+          if (run) return <ProcessTurn key={run.id} run={run} fallbackAnswer={message.content} language={language} animateAnswer={run.id === revealingRunID} />
+          return <div className={`message-row ${message.role} ${message.createdAt === newMessageAt ? "message-entering" : ""}`} key={`${message.createdAt}-${index}`}><div className="avatar">{message.role === "user" ? text.you.slice(0, 1) : "A"}</div><div className="message"><span>{message.role === "user" ? text.you : "Algebrium"}</span><RenderBuffer content={message.content} /></div></div>
+        })}
+        {processRuns.filter((run) => !processRunHasAssistant(history, run)).map((run) => <ProcessTurn key={run.id} run={run} language={language} animateAnswer={run.id === revealingRunID} />)}
+        <div className="activity-stack">{verifications.map((verification, index) => <VerificationCard key={index} verification={verification} language={language} />)}{webResults.map((result, index) => <WebSearchCard key={`${result.query}-${index}`} result={result} language={language} />)}{error && <p className="error">{error}</p>}{context && <small className="context">{text.context} {context.estimatedTokens}/{context.budget} tokens{context.compressed ? ` · ${text.compressed}` : ""}</small>}</div>
         <div ref={messagesEnd} />
       </article>
+      {showScrollToBottom && <button type="button" className="scroll-to-bottom" onClick={scrollToBottom} aria-label={language === "zh" ? "回到底部" : "Back to bottom"} title={language === "zh" ? "回到底部" : "Back to bottom"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15m0 0 6-6m-6 6-6-6" /></svg></button>}
       <form className="composer" onSubmit={submit}>
         <textarea ref={questionInput} id="question" rows={2} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} disabled={loading} placeholder={text.placeholder} />
         <div className="composer-actions">
-          <label className="upload-button" title={text.upload}>＋<input type="file" accept=".txt,.md,.csv,.json" disabled={loading || uploading} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = "" }} /></label>
+          <label className="upload-button" title={text.upload}>＋<input type="file" accept=".txt,.md,.csv,.json" disabled={loading || uploading || connection !== "connected"} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = "" }} /></label>
           <span>{uploading ? text.uploading : text.composerHint}</span>
-          {loading ? <button className="stop-button" type="button" disabled={stopping} onClick={() => void stop()}>{stopping ? text.stopping : text.stop}</button> : <button className="send-button" disabled={!question.trim()} aria-label={text.send}>↑</button>}
+          {loading ? <button className="stop-button" type="button" disabled={stopping} onClick={() => void stop()}>{stopping ? text.stopping : text.stop}</button> : <button className="send-button" disabled={!question.trim() || connection !== "connected"} aria-label={text.send}>↑</button>}
         </div>
       </form>
     </section>
@@ -231,7 +314,7 @@ export function App() {
     <aside className="render-sidebar">
       <header className="render-header"><div className="render-heading"><h2>{text.plots}</h2><span>{artifacts.length} {text.artifacts}</span></div><button type="button" className="icon-button" onClick={() => setRightCollapsed((value) => !value)} aria-label={rightCollapsed ? text.expandPlots : text.collapsePlots}>{rightCollapsed ? "‹" : "›"}</button></header>
       <div className="render-content" aria-hidden={rightCollapsed}>
-        <div className="plot-gallery">{artifacts.length ? <ArtifactGallery items={artifacts} colorScheme={colorScheme} /> : <div className="render-empty"><span>⌁</span><strong>{text.noPlots}</strong><p>{text.noPlotsBody}</p></div>}</div>
+        <div className="plot-gallery">{artifacts.length ? <ArtifactGallery items={artifacts} colorScheme={colorScheme} language={language} /> : <div className="render-empty"><span>⌁</span><strong>{text.noPlots}</strong><p>{text.noPlotsBody}</p></div>}</div>
         <details className="theory-drawer"><summary>验证路径</summary><TheoryTree nodes={theory} selected={selected} onSelect={setSelected} /></details>
       </div>
     </aside>
@@ -320,6 +403,105 @@ function artifactTool(artifact: PlotArtifact) {
   return "geometry.construct"
 }
 
+function restoreProcessRuns(runs: ProcessHistoryRun[]): ProcessRun[] {
+  return runs.map((run) => {
+    let steps: ProcessStep[] = []
+    let finalAnswer: string | undefined
+    for (const event of run.events) {
+      if (event.type === "answer") finalAnswer = event.text
+      else steps = applyProcessHistoryEvent(steps, event)
+    }
+    return { id: run.id, userMessageCreatedAt: run.userMessageCreatedAt, completed: run.completed, steps, finalAnswer }
+  })
+}
+
+function reconcileProcessRuns(current: ProcessRun[], persisted: ProcessHistoryRun[]) {
+  const restored = restoreProcessRuns(persisted)
+  const live = current.at(-1)
+  const saved = restored.at(-1)
+  if (!live || !saved) return restored
+  return [...restored.slice(0, -1), { ...live, userMessageCreatedAt: saved.userMessageCreatedAt, completed: saved.completed, finalAnswer: saved.finalAnswer ?? live.finalAnswer }]
+}
+
+function applyProcessHistoryEvent(steps: ProcessStep[], event: ProcessHistoryEvent): ProcessStep[] {
+  if (event.type === "chunk") return appendProcessText(steps, "assistant", event.text)
+  if (event.type === "reasoning.chunk") return appendProcessText(steps, "reasoning", event.text)
+  if (event.type === "answer") return steps
+  if (event.type === "tool.start") return appendProcessTool(steps, { id: crypto.randomUUID(), tool: event.tool, status: "running", startedAt: Date.now(), input: event.input })
+  if (event.type === "tool.result") return completeProcessTool(steps, event.tool, event.result)
+  if (event.type === "tool.error") return completeProcessTool(steps, event.tool, undefined, event.message)
+  return completeProcessTool(steps, event.tool)
+}
+
+function updateActiveProcessAnswer(current: ProcessRun[], answer: string): ProcessRun[] {
+  const index = lastIncompleteProcessRunIndex(current)
+  if (index < 0) return current
+  return current.map((run, runIndex) => runIndex === index ? { ...run, finalAnswer: answer } : run)
+}
+
+function updateActiveProcessRun(current: ProcessRun[], update: (steps: ProcessStep[]) => ProcessStep[]): ProcessRun[] {
+  const index = lastIncompleteProcessRunIndex(current)
+  if (index < 0) return current
+  return current.map((run, runIndex) => runIndex === index ? { ...run, steps: update(run.steps) } : run)
+}
+
+function completeActiveProcessRun(current: ProcessRun[]): ProcessRun[] {
+  const index = lastIncompleteProcessRunIndex(current)
+  if (index < 0) return current
+  return current.map((run, runIndex) => runIndex === index ? { ...run, completed: true } : run)
+}
+
+function lastIncompleteProcessRunIndex(runs: ProcessRun[]) {
+  for (let index = runs.length - 1; index >= 0; index--) {
+    if (!runs[index]?.completed) return index
+  }
+  return -1
+}
+
+function processRunForAssistant(messages: SessionMessage[], assistantIndex: number, runs: ProcessRun[]) {
+  for (let index = assistantIndex - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message?.role === "user") return runs.find((run) => run.userMessageCreatedAt === message.createdAt)
+  }
+  return undefined
+}
+
+function processRunHasAssistant(messages: SessionMessage[], run: ProcessRun) {
+  const userIndex = messages.findIndex((message) => message.role === "user" && message.createdAt === run.userMessageCreatedAt)
+  if (userIndex < 0) return false
+  for (let index = userIndex + 1; index < messages.length; index++) {
+    if (messages[index]?.role === "user") return false
+    if (messages[index]?.role === "assistant") return true
+  }
+  return false
+}
+
+function appendProcessText(current: ProcessStep[], kind: "assistant" | "reasoning", text: string): ProcessStep[] {
+  const last = current.at(-1)
+  if (kind === "assistant") {
+    if (last?.kind === "assistant") return [...current.slice(0, -1), { ...last, lines: [...last.lines, text] }]
+    return [...current, { id: crypto.randomUUID(), kind, lines: [text] }]
+  }
+  if (last?.kind === "reasoning") return [...current.slice(0, -1), { ...last, content: last.content + text }]
+  return [...current, { id: crypto.randomUUID(), kind, content: text }]
+}
+
+function appendProcessTool(current: ProcessStep[], activity: ToolActivity): ProcessStep[] {
+  const last = current.at(-1)
+  if (last?.kind === "tools") return [...current.slice(0, -1), { ...last, activities: [...last.activities, activity] }]
+  return [...current, { id: crypto.randomUUID(), kind: "tools", activities: [activity] }]
+}
+
+function completeProcessTool(current: ProcessStep[], tool: string, result?: CASResult, error?: string): ProcessStep[] {
+  for (let index = current.length - 1; index >= 0; index--) {
+    const step = current[index]
+    if (step?.kind !== "tools" || !step.activities.some((item) => item.tool === tool && item.status === "running")) continue
+    return current.map((item, itemIndex) => itemIndex === index ? { ...step, activities: completeTool(step.activities, tool, result, error) } : item)
+  }
+  const status = error ? "error" as const : "complete" as const
+  return appendProcessTool(current, { id: crypto.randomUUID(), tool, status, startedAt: Date.now(), result, error })
+}
+
 function completeTool(current: ToolActivity[], tool: string, result?: CASResult, error?: string): ToolActivity[] {
   const reverseIndex = [...current].reverse().findIndex((item) => item.tool === tool && item.status === "running")
   const index = reverseIndex < 0 ? -1 : current.length - reverseIndex - 1
@@ -328,13 +510,79 @@ function completeTool(current: ToolActivity[], tool: string, result?: CASResult,
   return current.map((item, itemIndex): ToolActivity => itemIndex === index ? { ...item, status, result, error } : item)
 }
 
+function ProcessTurn({ run, fallbackAnswer, language, animateAnswer }: { run: ProcessRun; fallbackAnswer?: string; language: Language; animateAnswer: boolean }) {
+  const answer = run.finalAnswer ?? (run.completed ? fallbackAnswer : undefined)
+  const hasProcess = run.steps.some((step) => step.kind !== "assistant")
+  return <>
+    {hasProcess && <ProcessFlow steps={run.steps} language={language} loading={!run.completed} />}
+    {run.completed && answer && <FinalAnswer content={answer} animate={animateAnswer} />}
+  </>
+}
+
+function ProcessFlow({ steps, language, loading }: { steps: ProcessStep[]; language: Language; loading: boolean }) {
+  return <div className="message-row assistant message-entering process-flow-row">
+    <div className="avatar">A</div>
+    <div className="message process-flow"><span>Algebrium</span>
+      {steps.map((step) => {
+        if (step.kind === "assistant") return null
+        if (step.kind === "reasoning") return <ReasoningBlock key={step.id} content={step.content} language={language} active={loading && step === steps.at(-1)} />
+        return <ToolActivityGroup key={step.id} activities={step.activities} language={language} />
+      })}
+    </div>
+  </div>
+}
+
+function FinalAnswer({ content, animate }: { content: string; animate: boolean }) {
+  const bufferedLines = content.match(/[^\n]*\n|[^\n]+$/g) ?? [content]
+  const lines = renderableAssistantLines(bufferedLines, true)
+  return <div className={`message-row assistant final-answer-row ${animate ? "is-revealing" : "is-settled"}`}>
+    <div className="avatar">A</div>
+    <div className="message final-answer-stage">
+      <span>Algebrium</span>
+      <div className="final-answer-lines">
+        {lines.map((line, index) => {
+          const progress = lines.length <= 1 ? 0 : index / (lines.length - 1)
+          const lineStyle = {
+            "--answer-line-delay": `${280 + index * 78}ms`,
+            "--answer-line-rise": `${18 - progress * 10}px`,
+            "--answer-line-rebound": `${-(2.2 - progress * 1.35)}px`,
+          } as CSSProperties
+          return <div className="final-answer-line" style={lineStyle} key={index}><RenderBuffer content={line} /></div>
+        })}
+      </div>
+    </div>
+  </div>
+}
+
+function renderableAssistantLines(lines: string[], complete: boolean) {
+  const result: string[] = []
+  let pending = ""
+  for (const line of lines) {
+    pending += line
+    const incompleteFence = (pending.match(/```/g)?.length ?? 0) % 2 === 1
+    if (incompleteFence || splitRenderBuffer(pending).pending) continue
+    if (!pending.trim() && result.length > 0) result[result.length - 1] += pending
+    else result.push(pending)
+    pending = ""
+  }
+  if (complete && pending) result.push(pending)
+  return result
+}
+
+function ReasoningBlock({ content, language, active }: { content: string; language: Language; active: boolean }) {
+  const [open, setOpen] = useState(active)
+  useEffect(() => { setOpen(active) }, [active])
+  return <details className={`reasoning-block ${active ? "active" : "complete"}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><span className="reasoning-dot" />{language === "zh" ? (active ? "正在思考" : "模型思考") : (active ? "Thinking" : "Model reasoning")}<span className="tool-group-chevron" aria-hidden="true" /></summary>
+    <div className="reasoning-content"><RenderBuffer content={content} /></div>
+  </details>
+}
+
 function ToolActivityGroup({ activities, language }: { activities: ToolActivity[]; language: Language }) {
   const running = activities.filter((activity) => activity.status === "running").length
   const failed = activities.filter((activity) => activity.status === "error").length
   const [open, setOpen] = useState(running > 0)
-  useEffect(() => {
-    if (running > 0) setOpen(true)
-  }, [running])
+  useEffect(() => { setOpen(running > 0) }, [running])
   const label = language === "zh"
     ? running ? `正在调用 ${running} 个工具` : failed ? `${activities.length} 个工具调用完成，${failed} 个失败` : `已调用 ${activities.length} 个工具`
     : running ? `Running ${running} tools` : failed ? `${activities.length} tools completed, ${failed} failed` : `Ran ${activities.length} tools`
@@ -373,6 +621,7 @@ function ToolCard({ activity, language }: { activity: ToolActivity; language: La
     <div className="tool-detail">
       <div className="tool-detail-heading"><span>{language === "zh" ? "调用详情" : "Call details"}</span><code>{activity.tool}</code></div>
       {activity.status === "running" && <div className="tool-running"><span className="spinner" />{language === "zh" ? (elapsed >= 30 ? "计算较复杂；可使用下方停止按钮终止。" : "正在等待安全工具返回…") : (elapsed >= 30 ? "This is taking longer; use Stop below to cancel." : "Waiting for the secure tool response…")}</div>}
+      {activity.input !== undefined && <pre className="tool-input">{JSON.stringify(activity.input, null, 2)}</pre>}
       {activity.result && <pre>{activity.result.text}</pre>}
       {activity.error && <pre className="tool-error-message">{activity.error}</pre>}
     </div>
@@ -390,17 +639,23 @@ function toolLabel(tool: string, language: Language) {
     series: "计算级数",
     matrix: "执行矩阵运算",
     assume: "设置数学假设",
-    eval: "数值计算",
+    eval: "计算表达式",
+    numeric: "数值近似",
+    statistics: "计算统计量",
+    distribution: "计算概率分布",
+    hypothesis: "执行假设检验",
     "plot.function2d": "绘制二维函数",
     "plot.surface3d": "绘制三维曲面",
     "geometry.construct": "构造平面几何图",
     verify: "验证符号等价性",
+    "web.search": "搜索数学资料",
   }
-  const labelsEn: Record<string, string> = { integrate: "Calculate integral", diff: "Calculate derivative", solve: "Solve equation", simplify: "Simplify expression", factor: "Factor expression", limit: "Calculate limit", series: "Calculate series", matrix: "Run matrix operation", assume: "Set assumptions", eval: "Numerical evaluation", "plot.function2d": "Plot 2D function", "plot.surface3d": "Plot 3D surface", "geometry.construct": "Construct plane geometry", verify: "Verify symbolic equivalence" }
+  const labelsEn: Record<string, string> = { integrate: "Calculate integral", diff: "Calculate derivative", solve: "Solve equation", simplify: "Simplify expression", factor: "Factor expression", limit: "Calculate limit", series: "Calculate series", matrix: "Run matrix operation", assume: "Set assumptions", eval: "Evaluate expression", numeric: "Numerical approximation", statistics: "Calculate statistics", distribution: "Calculate distribution", hypothesis: "Run hypothesis test", "plot.function2d": "Plot 2D function", "plot.surface3d": "Plot 3D surface", "geometry.construct": "Construct plane geometry", verify: "Verify symbolic equivalence", "web.search": "Search math sources" }
   return (language === "zh" ? labelsZh : labelsEn)[tool] ?? tool
 }
 
 function toolKind(tool: string) {
+  if (tool === "web.search") return "search"
   if (tool.startsWith("plot.") || tool.startsWith("geometry.")) return "plot"
   if (tool === "verify") return "verify"
   return "terminal"
@@ -419,6 +674,18 @@ function VerificationCard({ verification, language }: { verification: Verificati
     <pre>{verification.evidence}</pre>
     <small>{verification.domainNote}</small>
   </details>
+}
+
+function WebSearchCard({ result, language }: { result: WebSearchResult; language: Language }) {
+  return <section className="web-search-card">
+    <strong>{language === "zh" ? "网络资料" : "Web sources"}</strong>
+    <small>{result.query}</small>
+    {result.sources.length === 0 && <p>{language === "zh" ? "没有来自允许数学来源的结果。" : "No results from allowed math sources."}</p>}
+    <ol>{result.sources.map((source) => {
+      const href = citationURL(source.url)
+      return <li key={source.url}><a href={href} target="_blank" rel="noreferrer">{source.title}</a><span>{source.domain}</span>{source.snippet && <p>{source.snippet}</p>}</li>
+    })}</ol>
+  </section>
 }
 
 export function splitRenderBuffer(content: string) {
@@ -465,12 +732,18 @@ function ArtifactSlot({ item, colorScheme }: { item: ArtifactState; colorScheme:
   return item.artifact ? <Artifact artifact={item.artifact} colorScheme={colorScheme} /> : null
 }
 
-function ArtifactGallery({ items, colorScheme }: { items: ArtifactState[]; colorScheme: ColorScheme }) {
-  const combined = items.filter((item) => item.status === "ready" && (item.artifact?.kind === "plotly2d" || item.artifact?.kind === "jsxgraph"))
-  const separate = items.filter((item) => !combined.includes(item))
+function ArtifactGallery({ items, colorScheme, language }: { items: ArtifactState[]; colorScheme: ColorScheme; language: Language }) {
+  const [layout, setLayout] = useState<"combined" | "separate">("combined")
+  const planeItems = items.filter((item) => item.status === "ready" && (item.artifact?.kind === "plotly2d" || item.artifact?.kind === "jsxgraph"))
+  const otherItems = items.filter((item) => !planeItems.includes(item))
   return <>
-    {combined.length > 0 && <CombinedPlane artifacts={combined.map((item) => item.artifact!)} colorScheme={colorScheme} />}
-    {separate.map((item) => <ArtifactSlot key={item.id} item={item} colorScheme={colorScheme} />)}
+    {planeItems.length > 1 && <div className="plot-layout-switch" role="group" aria-label={language === "zh" ? "二维图像布局" : "2D plot layout"}>
+      <button type="button" className={layout === "combined" ? "active" : ""} onClick={() => setLayout("combined")}>{language === "zh" ? "叠加" : "Overlay"}</button>
+      <button type="button" className={layout === "separate" ? "active" : ""} onClick={() => setLayout("separate")}>{language === "zh" ? "分图" : "Separate"}</button>
+    </div>}
+    {planeItems.length > 0 && layout === "combined" && <CombinedPlane artifacts={planeItems.map((item) => item.artifact!)} colorScheme={colorScheme} />}
+    {layout === "separate" && planeItems.map((item) => <ArtifactSlot key={item.id} item={item} colorScheme={colorScheme} />)}
+    {otherItems.map((item) => <ArtifactSlot key={item.id} item={item} colorScheme={colorScheme} />)}
   </>
 }
 
@@ -497,7 +770,8 @@ function CombinedPlane({ artifacts, colorScheme }: { artifacts: PlotArtifact[]; 
       const extent = Math.max(5, ...values.map((value) => Math.abs(value))) * 1.1
       const palette = graphPalette(colorScheme)
       const board = JXG.JSXGraph.initBoard(element, graphBoardOptions([-extent, extent, extent, -extent], palette, true))
-      curves.forEach((trace) => board.create("curve", [trace.x, trace.y], { name: trace.name ?? "函数", strokeWidth: 2.5, strokeColor: palette.curve }))
+      const curveColors = [palette.curve, "#d14c32", "#8b5cf6", "#0d9488", "#d97706", "#db2777", "#4f46e5", "#65a30d"]
+      curves.forEach((trace, index) => board.create("curve", [trace.x, trace.y], { name: trace.name ?? "函数", withLabel: true, strokeWidth: 2.5, strokeColor: curveColors[index % curveColors.length] }))
       geometry.forEach((spec) => {
         const points = new Map(spec.points.map((point) => {
           const value = board.create("point", [point.x, point.y], { name: point.id, strokeColor: palette.point, fillColor: palette.point, label: { color: palette.ink } })

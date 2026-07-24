@@ -2,7 +2,16 @@ const origin = "http://127.0.0.1:4097"
 
 export type Session = { id: string; subject?: string; createdAt?: number; updatedAt?: number; title?: string }
 export type SessionMessage = { role: "user" | "assistant"; content: string; createdAt: number }
-export type SessionDetail = Session & { messages: SessionMessage[] }
+export type ProcessHistoryEvent =
+  | { type: "chunk"; text: string }
+  | { type: "reasoning.chunk"; text: string }
+  | { type: "answer"; text: string }
+  | { type: "tool.start"; tool: string; input?: unknown }
+  | { type: "tool.result"; tool: string; result: CASResult }
+  | { type: "tool.error"; tool: string; message: string }
+  | { type: "tool.complete"; tool: string }
+export type ProcessHistoryRun = { id: string; userMessageCreatedAt: number; events: ProcessHistoryEvent[]; completed: boolean }
+export type SessionDetail = Session & { messages: SessionMessage[]; artifacts: PlotArtifact[]; webResults: WebSearchResult[]; processRuns: ProcessHistoryRun[] }
 export type CASResult = { tool: string; text: string; normalized: string; durationMs: number }
 export type VerificationResult = { verified: boolean; normalized: string; evidence: string; domainNote: string }
 export type ContextSnapshot = { budget: number; estimatedTokens: number; compressed: boolean; retainedTurns: number; treeVersion: number }
@@ -13,6 +22,9 @@ export type PlotArtifact = {
   data: string | Record<string, unknown>
   meta: Record<string, string | number>
 }
+export type WebSearchSource = { title: string; url: string; domain: string; snippet: string }
+export type WebSearchDiagnostics = { attempts: number; rawResults: number; fallbackEngine?: string }
+export type WebSearchResult = { query: string; sources: WebSearchSource[]; diagnostics?: WebSearchDiagnostics }
 export type TheoryNode = {
   id: string
   parentID?: string
@@ -32,13 +44,16 @@ export type ProviderSettings = { active: string; profiles: Record<string, Provid
 export type ProviderSettingsInput = { id: string; provider: string; model: string; baseURL?: string; apiKey?: string }
 export type StreamEvent =
   | { type: "chunk"; text: string }
-  | { type: "tool.start"; tool: string }
+  | { type: "reasoning.chunk"; text: string }
+  | { type: "answer"; text: string }
+  | { type: "tool.start"; tool: string; input?: unknown }
   | { type: "tool.result"; tool: string; result: CASResult }
   | { type: "tool.error"; tool: string; message: string }
   | { type: "artifact.pending"; artifact: { id: string; kind: PlotArtifact["kind"]; title: string } }
   | { type: "artifact"; artifact: PlotArtifact }
   | { type: "verification"; result: VerificationResult }
   | { type: "theory.updated"; node: TheoryNode; version: number }
+  | { type: "web.result"; result: WebSearchResult }
   | { type: "error"; message: string }
   | { type: "done"; context: ContextSnapshot }
 
@@ -52,6 +67,10 @@ export function getTheory(sessionID: string) {
 
 export function listSessions() {
   return request<Session[]>("/sessions")
+}
+
+export function getHealth() {
+  return request<{ ok: boolean; provider: { mode: "mock" | "real"; id?: string; model?: string } }>("/health")
 }
 
 export function getSession(sessionID: string) {

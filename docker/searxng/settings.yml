@@ -1,0 +1,16 @@
+use_default_settings: true
+
+general:
+  instance_name: Algebrium Local Search
+
+search:
+  safe_search: 2
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: algebrium-local-only-not-for-public-use
+  limiter: false
+  image_proxy: false
+  public_instance: false

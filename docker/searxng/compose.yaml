@@ -1,0 +1,10 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "127.0.0.1:8088:8080"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - ../../data/searxng:/var/cache/searxng
+    security_opt:
+      - no-new-privileges:true

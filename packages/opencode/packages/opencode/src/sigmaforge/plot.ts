@@ -12,7 +12,18 @@ export type PlotArtifact = {
   meta: Record<string, string | number>
 }
 
-const function2dSchema = z.object({ id: z.string().uuid().optional(), expression: z.string().min(1).max(500), variable: z.string().default("x"), min: z.number().finite().min(-1e4).max(1e4), max: z.number().finite().min(-1e4).max(1e4), width: z.number().int().min(320).max(1600).default(800) })
+const function2dSchema = z.object({
+  id: z.string().uuid().optional(),
+  coordinateSystem: z.enum(["cartesian", "polar", "implicit"]).default("cartesian"),
+  expression: z.string().min(1).max(500).optional(),
+  expressions: z.array(z.string().min(1).max(500)).min(1).max(8).optional(),
+  variable: z.string().default("x"),
+  xVariable: z.string().default("x"),
+  yVariable: z.string().default("y"),
+  min: z.number().finite().min(-1e4).max(1e4),
+  max: z.number().finite().min(-1e4).max(1e4),
+  width: z.number().int().min(320).max(1600).default(800),
+}).refine((request) => request.expression !== undefined || request.expressions !== undefined, "At least one function expression is required")
 
 export async function plotFunction2D(
   kernel: KernelExecutor,
@@ -23,9 +34,28 @@ export async function plotFunction2D(
   assertToolAllowed(subject, "plot.function2d")
   const request = function2dSchema.parse(input)
   if (request.min >= request.max) throw new Error("Plot range must be increasing")
+  if (request.coordinateSystem === "implicit") return plotImplicitCurves(kernel, sessionID, request)
   const variable = requireIdentifier(request.variable)
-  const output = await kernel.execute(sessionID, `import json, math
-var('${variable}'); f=SR(${quoteSageString(request.expression)})
+  const expressions = [...new Set([...(request.expressions ?? []), ...(request.expression ? [request.expression] : [])])]
+  const traces = await Promise.all(expressions.map(async (expression) => {
+    const output = await kernel.execute(sessionID, request.coordinateSystem === "polar" ? `import json, math
+var('${variable}'); r=SR(${quoteSageString(expression)})
+try:
+    sf_fast=fast_callable(r, vars=[${variable}], domain=RDF)
+except Exception:
+    sf_fast=None
+def sf_value(v):
+    try:
+        n=float(sf_fast(v) if sf_fast is not None else r.subs({${variable}:v}).n())
+        return n if math.isfinite(n) else None
+    except Exception:
+        return None
+ts=[float(${request.min}+(${request.max}-${request.min})*i/320) for i in range(321)]
+rs=[sf_value(v) for v in ts]
+xs=[None if r is None else r*math.cos(t) for r,t in zip(rs,ts)]
+ys=[None if r is None else r*math.sin(t) for r,t in zip(rs,ts)]
+print(json.dumps({'x':xs,'y':ys}))` : `import json, math
+var('${variable}'); f=SR(${quoteSageString(expression)})
 try:
     sf_fast=fast_callable(f, vars=[${variable}], domain=RDF)
 except Exception:
@@ -39,8 +69,83 @@ def sf_value(v):
 xs=[float(${request.min}+(${request.max}-${request.min})*i/160) for i in range(161)]
 ys=[sf_value(v) for v in xs]
 print(json.dumps({'x':xs,'y':ys}))`)
-  const points = parseJSON<{ x: number[]; y: Array<number | null> }>(output.text)
-  return { id: request.id ?? crypto.randomUUID(), kind: "plotly2d", mime: "application/vnd.plotly.v1+json", data: { data: [{ type: "scatter", mode: "lines", x: points.x, y: points.y, name: request.expression }], layout: { title: request.expression, xaxis: { title: variable, zeroline: true }, yaxis: { zeroline: true }, dragmode: "pan" } }, meta: { expression: request.expression, min: request.min, max: request.max } }
+    const points = parseJSON<{ x: number[]; y: Array<number | null> }>(output.text)
+    return { type: "scatter", mode: "lines", x: points.x, y: points.y, name: expression }
+  }))
+  const title = expressions.join(" · ")
+  const polar = request.coordinateSystem === "polar"
+  return { id: request.id ?? crypto.randomUUID(), kind: "plotly2d", mime: "application/vnd.plotly.v1+json", data: { data: traces, layout: { title, xaxis: { title: polar ? "x" : variable, zeroline: true }, yaxis: polar ? { title: "y", zeroline: true, scaleanchor: "x", scaleratio: 1 } : { zeroline: true }, dragmode: "pan" } }, meta: { expression: title, functions: expressions.length, min: request.min, max: request.max, coordinateSystem: request.coordinateSystem } }
+}
+
+async function plotImplicitCurves(kernel: KernelExecutor, sessionID: string, request: z.infer<typeof function2dSchema>): Promise<PlotArtifact> {
+  const expressions = [...new Set([...(request.expressions ?? []), ...(request.expression ? [request.expression] : [])])]
+  if (!expressions.length) throw new Error("An implicit expression is required")
+  const x = requireIdentifier(request.xVariable)
+  const y = requireIdentifier(request.yVariable)
+  const traces = await Promise.all(expressions.map(async (source) => {
+    const expression = implicitDifference(source)
+    const output = await kernel.execute(sessionID, `import json, math
+var('${x} ${y}'); f=SR(${quoteSageString(expression)})
+try:
+    sf_fast=fast_callable(f, vars=[${x},${y}], domain=RDF)
+except Exception:
+    sf_fast=None
+def sf_value(a,b):
+    try:
+        n=float(sf_fast(a,b) if sf_fast is not None else f.subs({${x}:a,${y}:b}).n())
+        return n if math.isfinite(n) else None
+    except Exception:
+        return None
+xs=[float(${request.min}+(${request.max}-${request.min})*i/120) for i in range(121)]
+ys=[float(${request.min}+(${request.max}-${request.min})*i/120) for i in range(121)]
+zs=[[sf_value(a,b) for a in xs] for b in ys]
+print(json.dumps({'x':xs,'y':ys,'z':zs}))`)
+    const grid = parseJSON<{ x: number[]; y: number[]; z: Array<Array<number | null>> }>(output.text)
+    const points = contourZero(grid)
+    return { type: "scatter", mode: "lines", x: points.x, y: points.y, line: { width: 2 }, name: source, connectgaps: false }
+  }))
+  const title = expressions.join(" · ")
+  return {
+    id: request.id ?? crypto.randomUUID(), kind: "plotly2d", mime: "application/vnd.plotly.v1+json",
+    data: { data: traces, layout: { title: `隐函数：${title}`, xaxis: { title: x, zeroline: true }, yaxis: { title: y, zeroline: true, scaleanchor: "x", scaleratio: 1 }, dragmode: "pan" } },
+    meta: { expression: title, functions: expressions.length, min: request.min, max: request.max, coordinateSystem: "implicit" },
+  }
+}
+
+function implicitDifference(expression: string) {
+  const equality = expression.match(/^(.+?)(?<![<>!])={1,2}(?!=)(.+)$/)
+  return equality ? `(${equality[1]!})-(${equality[2]!})` : expression
+}
+
+function contourZero(grid: { x: number[]; y: number[]; z: Array<Array<number | null>> }) {
+  const x: Array<number | null> = []
+  const y: Array<number | null> = []
+  const add = (left: [number, number], right: [number, number]) => {
+    x.push(left[0], right[0], null)
+    y.push(left[1], right[1], null)
+  }
+  const crossing = (first: number | null, second: number | null, start: [number, number], end: [number, number]) => {
+    if (first === null || second === null || !Number.isFinite(first) || !Number.isFinite(second)) return undefined
+    if (first !== 0 && second !== 0 && Math.sign(first) === Math.sign(second)) return undefined
+    const ratio = first === second ? 0.5 : Math.max(0, Math.min(1, -first / (second - first)))
+    return [start[0] + (end[0] - start[0]) * ratio, start[1] + (end[1] - start[1]) * ratio] as [number, number]
+  }
+  for (let row = 0; row < grid.y.length - 1; row++) {
+    for (let column = 0; column < grid.x.length - 1; column++) {
+      const topLeft: [number, number] = [grid.x[column]!, grid.y[row]!]
+      const topRight: [number, number] = [grid.x[column + 1]!, grid.y[row]!]
+      const bottomRight: [number, number] = [grid.x[column + 1]!, grid.y[row + 1]!]
+      const bottomLeft: [number, number] = [grid.x[column]!, grid.y[row + 1]!]
+      const values = [grid.z[row]?.[column] ?? null, grid.z[row]?.[column + 1] ?? null, grid.z[row + 1]?.[column + 1] ?? null, grid.z[row + 1]?.[column] ?? null]
+      const points = [crossing(values[0], values[1], topLeft, topRight), crossing(values[1], values[2], topRight, bottomRight), crossing(values[2], values[3], bottomRight, bottomLeft), crossing(values[3], values[0], bottomLeft, topLeft)].filter((point): point is [number, number] => point !== undefined)
+      if (points.length === 2) add(points[0]!, points[1]!)
+      if (points.length === 4) {
+        add(points[0]!, points[1]!)
+        add(points[2]!, points[3]!)
+      }
+    }
+  }
+  return { x, y }
 }
 
 const surface3dSchema = z.object({ expression: z.string().min(1).max(500), xVariable: z.string().default("x"), yVariable: z.string().default("y"), xMin: z.number().min(-100).max(100), xMax: z.number().min(-100).max(100), yMin: z.number().min(-100).max(100), yMax: z.number().min(-100).max(100) })
