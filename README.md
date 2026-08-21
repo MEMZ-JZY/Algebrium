@@ -81,9 +81,9 @@ Algebrium 是一个 Windows 优先的本地数学智能体。它将 React 网页
 
 ## 所需环境
 
-- Windows 10/11、PowerShell 5.1 或更高版本。
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)（Linux containers 模式），建议至少预留 4 GB 内存。
-- [Bun](https://bun.sh/) 1.2 或更高版本；启动脚本也会检测 npm 标准目录中的 Bun。
+- Windows 10/11、PowerShell 7（pwsh）；未安装时执行 `winget install --id Microsoft.PowerShell --source winget`。
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)（Linux containers 模式），建议至少预留 4 GB 内存；Docker 引擎未运行时启动脚本会自动拉起 Docker Desktop 并等待就绪。
+- [Bun](https://bun.sh/) 1.2 或更高版本；未安装时启动脚本会自动安装（官方安装脚本失败时回退 `npm install -g bun`）。
 - Git；建议安装 Node.js 20+ 以满足周边工具需求。
 - 只有运行 Tauri 桌面壳时才需要 Rust stable 与 Microsoft C++ Build Tools。
 - 一个已配置 Provider 的 API Key；也可用 mock 模式离线验收。
@@ -91,15 +91,14 @@ Algebrium 是一个 Windows 优先的本地数学智能体。它将 React 网页
 ## 快速启动（网页端）
 
 ```powershell
-git clone <你的_GitHub_仓库地址> Algebrium
+git clone https://github.com/MEMZ-JZY/Algebrium.git Algebrium
 Set-Location Algebrium
-docker compose -f docker\sagemath\compose.yaml build
-.\scripts\start-algebrium.ps1
+.\scripts\start-algebrium.cmd
 ```
 
-首次启动脚本会安全地提示输入当前 Provider 的 API Key，仅写入本次 PowerShell 进程，不会写入 `config.json`。脚本会启动 Docker 服务，以及独立的后端和前端终端窗口。
+也可以直接双击仓库根目录的 `Start Algebrium.cmd`。首次启动时脚本会自动安装 Bun、安装前后端依赖、构建并启动 SageMath/Qdrant/SearXNG Docker 服务（首次构建镜像耗时较长），然后显示 Provider 选择菜单：用方向键选择服务商，按提示输入 API Key（输入内容隐藏）。可选择将密钥保存到仓库根目录的 `.env`（已被 Git 忽略），下次启动自动使用、无需重输；已保存时按 Enter 即可保留，也可输入新密钥替换。
 
-打开 `http://127.0.0.1:5173/`，确认 `http://127.0.0.1:4097/health` 返回 `{"ok":true}`，然后可输入 `求 ∫ x e^x dx` 进行验收。Docker 已健康时可使用 `.\scripts\start-algebrium.ps1 -SkipDocker`。关闭任一启动的终端窗口会停止相应开发服务。
+打开 `http://127.0.0.1:5173/`，确认 `http://127.0.0.1:4097/health` 返回 `{"ok":true}`，然后可输入 `求 ∫ x e^x dx` 进行验收。Docker 已健康时可使用 `.\scripts\start-algebrium-dev.ps1 -SkipDocker`。关闭任一启动的终端窗口会停止相应开发服务。
 
 停止容器：
 
@@ -112,12 +111,14 @@ docker compose -f docker\qdrant\compose.yaml down
 
 只修改根目录 `config.json` 的非敏感字段：设置 `provider.active`，再填写该平台控制台中显示的准确模型 ID。内置 DeepSeek、小米 MiMo、Kimi、火山方舟、OpenRouter、硅基流动的预设。
 
+API Key 有三种配置方式：启动时交互输入并按提示保存到本地 `.env`；或手动复制 `.env.example` 为 `.env` 并填入对应变量（如 `DEEPSEEK_API_KEY=...`）；或仅在当前会话设置环境变量：
+
 ```powershell
 $env:DEEPSEEK_API_KEY = "your-key"
 .\scripts\start-algebrium-dev.ps1
 ```
 
-也可将 `provider.mode` 设为 `mock`，或后端加 `--mock-provider`，用于不消耗 API 额度的固定流程测试。完整字段说明见 [config/README.md](config/README.md)。绝不要提交 `.env`、API Key、本地数据库或会话文件。
+Shell 环境变量优先于 `.env` 文件。若所选 Provider 的密钥缺失，启动脚本会直接报错并给出修复指引，而不会拉起注定失败的后端窗口。也可将 `provider.mode` 设为 `mock`，或后端加 `--mock-provider`，用于不消耗 API 额度的固定流程测试。完整字段说明见 [config/README.md](config/README.md)。绝不要提交 `.env`、API Key、本地数据库或会话文件。
 
 ## 单独运行各部分
 
@@ -191,9 +192,9 @@ Algebrium is a Windows-first, local mathematics agent. It combines a React web/d
 
 ## Requirements
 
-- Windows 10/11 and PowerShell 5.1+.
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) using Linux containers, with at least 4 GB RAM available.
-- [Bun](https://bun.sh/) 1.2+ (the launch script also detects the standard npm-installed Bun location).
+- Windows 10/11 and PowerShell 7 (pwsh); install with `winget install --id Microsoft.PowerShell --source winget` if missing.
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) using Linux containers, with at least 4 GB RAM available; the launcher starts Docker Desktop automatically when the engine is not running.
+- [Bun](https://bun.sh/) 1.2+; the launcher installs it automatically when missing (falling back to `npm install -g bun`).
 - Git for source control. Node.js 20+ is recommended for tooling.
 - Rust stable plus Microsoft C++ Build Tools only when running the Tauri desktop shell.
 - An API key for one configured provider, or mock mode for offline testing.
@@ -201,15 +202,16 @@ Algebrium is a Windows-first, local mathematics agent. It combines a React web/d
 ## Quick start (web UI)
 
 ```powershell
-git clone <YOUR_GITHUB_REPOSITORY_URL> Algebrium
+git clone https://github.com/MEMZ-JZY/Algebrium.git Algebrium
 Set-Location Algebrium
-docker compose -f docker\sagemath\compose.yaml build
-.\scripts\start-algebrium.ps1
+.\scripts\start-algebrium.cmd
 ```
 
-The launcher lets you choose a configured provider with the arrow keys, then securely prompts for its API key for the current PowerShell session; it never writes the selection or key to `config.json`. It starts Docker services plus separate backend and frontend windows. Open `http://127.0.0.1:5173/`, wait for `http://127.0.0.1:4097/health` to return `{"ok":true}`, then ask a question such as `求 ∫ x e^x dx`.
+Double-clicking `Start Algebrium.cmd` in the repository root works as well. On first launch the script installs Bun, installs frontend and backend dependencies, builds and starts the SageMath/Qdrant/SearXNG Docker services (the first image build takes a while), then shows the provider menu: pick a provider with the arrow keys and enter its API key (input hidden). You can save the key to the git-ignored root `.env` so later starts pick it up automatically; when a key is already configured, press Enter to keep it or type a replacement.
 
-Use `.\scripts\start-algebrium.ps1 -SkipDocker` after Docker is already healthy. Closing either spawned terminal stops that development service. Stop containers with:
+Open `http://127.0.0.1:5173/`, wait for `http://127.0.0.1:4097/health` to return `{"ok":true}`, then ask a question such as `求 ∫ x e^x dx`.
+
+Use `.\scripts\start-algebrium-dev.ps1 -SkipDocker` after Docker is already healthy. Closing either spawned terminal stops that development service. Stop containers with:
 
 ```powershell
 docker compose -f docker\sagemath\compose.yaml down
@@ -218,14 +220,16 @@ docker compose -f docker\qdrant\compose.yaml down
 
 ## Provider configuration
 
-Edit only the non-secret fields in root `config.json`: select `provider.active`, then set the provider model ID. Presets are included for DeepSeek, Xiaomi MiMo, Kimi, Volcengine Ark, OpenRouter, and SiliconFlow. Put the matching key only in the current session:
+Edit only the non-secret fields in root `config.json`: select `provider.active`, then set the provider model ID. Presets are included for DeepSeek, Xiaomi MiMo, Kimi, Volcengine Ark, OpenRouter, and SiliconFlow.
+
+Configure the API key in one of three ways: enter it at startup and accept the prompt to save it to the local `.env`; copy `.env.example` to `.env` and fill in the matching variable (for example `DEEPSEEK_API_KEY=...`); or set it for the current session only:
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "your-key"
 .\scripts\start-algebrium-dev.ps1
 ```
 
-For deterministic local testing, set `provider.mode` to `mock`, or start the backend with `--mock-provider`. See [config/README.md](config/README.md) for every profile field. Do not commit `.env`, API keys, local databases, or session files.
+Shell environment variables take precedence over `.env`. When the selected provider has no key, the launcher fails fast with instructions instead of spawning a backend window that dies instantly. For deterministic local testing, set `provider.mode` to `mock`, or start the backend with `--mock-provider`. See [config/README.md](config/README.md) for every profile field. Do not commit `.env`, API keys, local databases, or session files.
 
 ## Other ways to run
 

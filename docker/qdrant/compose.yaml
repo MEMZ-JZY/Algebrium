@@ -4,7 +4,8 @@ services:
     container_name: algebrium-qdrant
     restart: unless-stopped
     ports:
-      - "127.0.0.1:7333:6333"
+      # 7333 sits inside a common Windows/Hyper-V reserved port range; 17333 does not.
+      - "127.0.0.1:17333:6333"
     volumes:
       - ../../data/qdrant:/qdrant/storage
     deploy:

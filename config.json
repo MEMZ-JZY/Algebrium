@@ -5,7 +5,7 @@
     "profiles": {
       "deepseek": {
         "provider": "deepseek",
-        "model": "deepseek-v4-pro",
+        "model": "deepseek-v4-flash",
         "apiKeyEnv": "DEEPSEEK_API_KEY",
         "maxTokens": 200000,
         "timeoutMs": 120000,

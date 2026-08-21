@@ -11,3 +11,8 @@ if not exist "%ALGEBRIUM_BUN%" (
 
 cd /d "%ALGEBRIUM_ROOT%\packages\desktop"
 "%ALGEBRIUM_BUN%" run dev
+if errorlevel 1 (
+  echo.
+  echo The Algebrium frontend exited with an error. Review the message above.
+  pause
+)

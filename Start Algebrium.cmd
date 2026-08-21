@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-algebrium.ps1"
+"%~dp0scripts\start-algebrium.cmd" %*
 if errorlevel 1 (
   echo.
   echo Algebrium failed to start. Review the message above.

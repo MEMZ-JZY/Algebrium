@@ -52,7 +52,7 @@ export class MistakeInbox implements MistakeSink {
 
 export class QdrantClient {
   constructor(
-    readonly url = process.env.QDRANT_URL ?? "http://127.0.0.1:7333",
+    readonly url = process.env.QDRANT_URL ?? "http://127.0.0.1:17333",
     readonly collection = process.env.QDRANT_COLLECTION ?? "kb_math_v1",
   ) {}
 
