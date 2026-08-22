@@ -44,7 +44,7 @@
     "@solid-primitives/bounds": "0.1.3",
     "@solid-primitives/event-listener": "2.4.5",
     "@solid-primitives/media": "2.3.3",
-    "@solid-primitives/resize-observer": "2.1.3",
+    "@solid-primitives/resize-observer": "2.2.0",
     "@solidjs/meta": "catalog:",
     "@solidjs/router": "catalog:",
     "diff": "catalog:",
