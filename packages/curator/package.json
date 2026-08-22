@@ -10,7 +10,7 @@
   "devDependencies": {
     "@types/bun": "^1.2.0",
     "@typescript/native-preview": "^7.0.0-dev.20260715.1",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "zod": "^4.0.0"
