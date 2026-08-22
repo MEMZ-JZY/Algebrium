@@ -11,7 +11,7 @@ export type ProcessHistoryEvent =
   | { type: "tool.error"; tool: string; message: string }
   | { type: "tool.complete"; tool: string }
 export type ProcessHistoryRun = { id: string; userMessageCreatedAt: number; events: ProcessHistoryEvent[]; completed: boolean }
-export type SessionDetail = Session & { messages: SessionMessage[]; artifacts: PlotArtifact[]; webResults: WebSearchResult[]; processRuns: ProcessHistoryRun[] }
+export type SessionDetail = Session & { messages: SessionMessage[]; artifacts: PlotArtifact[]; webResults: WebSearchResult[]; processRuns: ProcessHistoryRun[]; thinkingSummaries: ThinkingSummary[]; thinkingVersion?: number }
 export type CASResult = { tool: string; text: string; normalized: string; durationMs: number }
 export type VerificationResult = { verified: boolean; normalized: string; evidence: string; domainNote: string }
 export type ContextSnapshot = { budget: number; estimatedTokens: number; compressed: boolean; retainedTurns: number; treeVersion: number }
@@ -39,6 +39,9 @@ export type TheoryNode = {
   children: string[]
 }
 export type TheoryTree = { sessionID: string; rootID?: string; version: number; nodes: Record<string, TheoryNode> }
+export type ThinkingSummary = { id: string; order: number; method: string; reason: string; caution: string; createdAt: number; updatedAt: number }
+export type ThinkingSummarySnapshot = { version: number; summaries: ThinkingSummary[] }
+export type ThinkingSummaryInput = { method?: string; reason?: string; caution?: string }
 export type ProviderProfile = { id: string; provider: string; model: string; baseURL?: string; apiKeyEnv: string; hasApiKey: boolean }
 export type ProviderSettings = { active: string; profiles: Record<string, ProviderProfile> }
 export type ProviderSettingsInput = { id: string; provider: string; model: string; baseURL?: string; apiKey?: string }
@@ -53,6 +56,7 @@ export type StreamEvent =
   | { type: "artifact"; artifact: PlotArtifact }
   | { type: "verification"; result: VerificationResult }
   | { type: "theory.updated"; node: TheoryNode; version: number }
+  | { type: "thinking.updated"; version: number; summaries: ThinkingSummary[] }
   | { type: "web.result"; result: WebSearchResult }
   | { type: "error"; message: string }
   | { type: "done"; context: ContextSnapshot }
@@ -63,6 +67,30 @@ export function createSession() {
 
 export function getTheory(sessionID: string) {
   return request<TheoryTree>(`/sessions/${sessionID}/theory`)
+}
+
+export function getThinking(sessionID: string) {
+  return request<ThinkingSummarySnapshot>(`/sessions/${sessionID}/thinking`)
+}
+
+export function updateThinkingSummary(sessionID: string, summaryID: string, input: ThinkingSummaryInput) {
+  return request<{ ok: boolean; summaries: ThinkingSummary[]; version: number }>(`/sessions/${sessionID}/thinking/${summaryID}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  })
+}
+
+export function deleteThinkingSummary(sessionID: string, summaryID: string) {
+  return request<{ ok: boolean; summaries: ThinkingSummary[]; version: number }>(`/sessions/${sessionID}/thinking/${summaryID}`, {
+    method: "DELETE",
+  })
+}
+
+export function rollbackThinkingSummary(sessionID: string, targetSummaryID?: string) {
+  return request<{ ok: boolean; summaries: ThinkingSummary[]; version: number }>(`/sessions/${sessionID}/thinking/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ targetSummaryID }),
+  })
 }
 
 export function listSessions() {

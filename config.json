@@ -59,6 +59,15 @@
         "timeoutMs": 120000,
         "headers": {},
         "extraBody": {}
+      },
+      "qwen": {
+        "provider": "qwen",
+        "model": "qwen3-coder-plus",
+        "apiKeyEnv": "QWEN_API_KEY",
+        "maxTokens": 200000,
+        "timeoutMs": 120000,
+        "headers": {},
+        "extraBody": {}
       }
     }
   }

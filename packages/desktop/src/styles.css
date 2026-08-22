@@ -494,3 +494,145 @@ figure img { background: #fff; }
   .chat-header, .composer { background: var(--paper); }
   .tool-detail, .settings-panel { background: var(--surface-secondary); }
 }
+
+.right-panel-tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 16px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+}
+
+.right-panel-tabs button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.right-panel-tabs button.active {
+  color: var(--ink);
+  background: var(--paper);
+  box-shadow: var(--shadow-soft);
+}
+
+.thinking-summary-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.thinking-summary {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+}
+
+.thinking-summary > header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.thinking-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.thinking-summary-actions button {
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--accent);
+  background: rgba(0, 113, 227, .08);
+  font-size: 11px;
+}
+
+.thinking-summary-actions button:hover {
+  background: rgba(0, 113, 227, .14);
+}
+
+.thinking-summary-body {
+  padding: 12px;
+}
+
+.thinking-summary-body h4 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.thinking-summary-body p {
+  margin: 6px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.thinking-summary-body strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.thinking-summary-edit {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.thinking-summary-edit label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.thinking-summary-edit input,
+.thinking-summary-edit textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--surface-secondary);
+  font-size: 12px;
+  resize: vertical;
+}
+
+.thinking-summary-edit input:focus,
+.thinking-summary-edit textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.thinking-summary-edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.thinking-summary-edit-actions button {
+  padding: 6px 10px;
+  border-radius: 7px;
+  color: var(--accent);
+  background: rgba(0, 113, 227, .08);
+  font-size: 12px;
+}

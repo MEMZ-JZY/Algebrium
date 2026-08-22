@@ -25,7 +25,7 @@ const requestSchema = z.discriminatedUnion("tool", [
 ])
 
 export type CASRequest = z.infer<typeof requestSchema>
-export type CASResult = { tool: CASRequest["tool"]; text: string; normalized: string; durationMs: number; artifacts?: string[] }
+export type CASResult = { tool: CASRequest["tool"] | "thinking.summary" | "thinking.rollback"; text: string; normalized: string; durationMs: number; artifacts?: string[] }
 
 export class CASToolbox {
   constructor(private readonly kernel: KernelExecutor) {}

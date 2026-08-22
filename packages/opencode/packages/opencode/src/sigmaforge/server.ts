@@ -1,4 +1,4 @@
-import { ZodError } from "zod"
+import { z, ZodError } from "zod"
 import { CASToolbox } from "./cas"
 import type { StreamEvent } from "./events"
 import { KernelGatewayClient, type KernelExecutor } from "./kernel"
@@ -17,6 +17,17 @@ import { mathProviderTools } from "./provider-tools"
 import { WebSearchRequestSchema, type WebSearchClient } from "./web-search"
 
 const providerGuidelines = Bun.file(new URL("./provider-guidelines.md", import.meta.url)).text()
+
+const thinkingSummarySchema = z.object({
+  method: z.string().min(1).max(120),
+  reason: z.string().min(1).max(300),
+  caution: z.string().max(300).optional(),
+})
+
+const thinkingRollbackSchema = z.object({
+  targetSummaryID: z.string().optional(),
+  reason: z.string().min(1).max(300),
+})
 
 export type SigmaForgeServerOptions = {
   hostname?: string
@@ -70,6 +81,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
     if (event.type === "artifact") sessions.addArtifact(sessionID, event.artifact)
     if (event.type === "web.result") sessions.addWebResult(sessionID, event.result)
     if (event.type === "theory.updated") sessions.save(sessionID)
+    if (event.type === "thinking.updated") sessions.save(sessionID)
     if (event.type === "done") sessions.finishProcess(sessionID)
     broadcast(sessionID, event)
   }
@@ -123,7 +135,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
       if (request.method === "GET" && sessionDetail) {
         try {
           const session = sessions.get(sessionDetail[1]!)
-          return Response.json({ id: session.id, subject: session.subject, createdAt: session.createdAt, updatedAt: session.updatedAt, messages: session.messages, artifacts: session.artifacts, webResults: session.webResults, processRuns: session.processRuns }, { headers })
+          return Response.json({ id: session.id, subject: session.subject, createdAt: session.createdAt, updatedAt: session.updatedAt, messages: session.messages, artifacts: session.artifacts, webResults: session.webResults, processRuns: session.processRuns, thinkingSummaries: session.thinking.snapshot().summaries, thinkingVersion: session.thinking.snapshot().version }, { headers })
         } catch (error) {
           return jsonError(error, 404, headers)
         }
@@ -208,6 +220,69 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           return Response.json(sessions.get(theory[1]!).theory.snapshot(), { headers })
         } catch (error) {
           return jsonError(error, 404, headers)
+        }
+      }
+
+      const thinking = url.pathname.match(/^\/sessions\/([^/]+)\/thinking$/)
+      if (request.method === "GET" && thinking) {
+        try {
+          return Response.json(sessions.get(thinking[1]!).thinking.snapshot(), { headers })
+        } catch (error) {
+          return jsonError(error, 404, headers)
+        }
+      }
+      if (request.method === "POST" && thinking) {
+        try {
+          const sessionID = thinking[1]!
+          const input = thinkingSummarySchema.parse(await request.json())
+          const summary = sessions.addThinking(sessionID, input)
+          const snapshot = sessions.get(sessionID).thinking.snapshot()
+          broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
+          return Response.json({ ok: true, summary, summaries: snapshot.summaries, version: snapshot.version }, { status: 201, headers })
+        } catch (error) {
+          return jsonError(error, statusFor(error), headers)
+        }
+      }
+
+      const thinkingRollback = url.pathname.match(/^\/sessions\/([^/]+)\/thinking\/rollback$/)
+      if (request.method === "POST" && thinkingRollback) {
+        try {
+          const sessionID = thinkingRollback[1]!
+          const input = (await request.json()) as { targetSummaryID?: string; reason?: string }
+          const parsed = thinkingRollbackSchema.parse({ ...input, reason: input.reason ?? "Manual rollback" })
+          const result = sessions.rollbackThinking(sessionID, parsed.targetSummaryID)
+          const snapshot = sessions.get(sessionID).thinking.snapshot()
+          broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
+          return Response.json({ ok: true, removed: result.removed.map((item) => item.id), summaries: snapshot.summaries, version: snapshot.version }, { headers })
+        } catch (error) {
+          return jsonError(error, statusFor(error), headers)
+        }
+      }
+
+      const thinkingItem = url.pathname.match(/^\/sessions\/([^/]+)\/thinking\/([^/]+)$/)
+      if (request.method === "PATCH" && thinkingItem) {
+        try {
+          const sessionID = thinkingItem[1]!
+          const summaryID = thinkingItem[2]!
+          const input = (await request.json()) as { method?: string; reason?: string; caution?: string }
+          const summary = sessions.updateThinking(sessionID, summaryID, input)
+          const snapshot = sessions.get(sessionID).thinking.snapshot()
+          broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
+          return Response.json({ ok: true, summary, summaries: snapshot.summaries, version: snapshot.version }, { headers })
+        } catch (error) {
+          return jsonError(error, statusFor(error), headers)
+        }
+      }
+      if (request.method === "DELETE" && thinkingItem) {
+        try {
+          const sessionID = thinkingItem[1]!
+          const summaryID = thinkingItem[2]!
+          const result = sessions.removeThinking(sessionID, summaryID)
+          const snapshot = sessions.get(sessionID).thinking.snapshot()
+          broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
+          return Response.json({ ok: true, removed: result.removed.id, summaries: snapshot.summaries, version: snapshot.version }, { headers })
+        } catch (error) {
+          return jsonError(error, statusFor(error), headers)
         }
       }
 
@@ -385,13 +460,15 @@ async function emitProviderReply(
       tool_calls: turn.toolCalls.map((call) => ({ id: requireToolCallID(call), type: "function", function: { name: call.name, arguments: call.arguments } })),
     })
     let executed = 0
+    let coveredBySummary = false
     for (const call of turn.toolCalls) {
       signal.throwIfAborted()
       const signature = `${call.name}:${canonicalToolArguments(call.arguments)}`
       let result = toolResults.get(signature)
       if (!toolResults.has(signature)) {
+        const autoSummary = call.name !== "sigmaforge_thinking_summary" && !coveredBySummary
         try {
-          result = await executeProviderTool(sessionID, call, sessions, cas, kernel, publish, problem.id, knowledgeBase, webSearch)
+          result = await executeProviderTool(sessionID, call, sessions, cas, kernel, publish, problem.id, knowledgeBase, webSearch, autoSummary)
           toolResults.set(signature, result)
           executed++
         } catch (error) {
@@ -401,6 +478,8 @@ async function emitProviderReply(
           result = { ok: false, error: message, instruction: "Correct the arguments once or explain the limitation. Do not repeat the same failed call." }
         }
       }
+      if (call.name === "sigmaforge_thinking_summary") coveredBySummary = true
+      else coveredBySummary = false
       messages.push({ role: "tool", tool_call_id: requireToolCallID(call), content: JSON.stringify(result) })
     }
     noProgressRounds = executed === 0 ? noProgressRounds + 1 : 0
@@ -421,12 +500,17 @@ async function executeProviderTool(
   parentID: string,
   knowledgeBase?: KnowledgeBaseReader,
   webSearch?: WebSearchClient,
+  autoSummary = false,
 ) {
-  const theory = sessions.get(sessionID).theory
-  const node = theory.add({ parentID, kind: "step", title: call.name, content: call.arguments })
-  publish(sessionID, { type: "theory.updated", node, version: theory.snapshot().version })
+  let node: TheoryNode | undefined
   try {
     const input = parseToolArguments(call)
+    if (call.name === "sigmaforge_thinking_summary") return executeThinkingSummary(sessionID, sessions, publish, input)
+    if (call.name === "sigmaforge_thinking_rollback") return executeThinkingRollback(sessionID, sessions, publish, input)
+    if (autoSummary) autoRecordThinkingSummary(sessionID, call.name, input, sessions, publish)
+    const theory = sessions.get(sessionID).theory
+    node = theory.add({ parentID, kind: "step", title: call.name, content: call.arguments })
+    publish(sessionID, { type: "theory.updated", node, version: theory.snapshot().version })
     const subject = sessions.subject(sessionID)
   if (call.name === "sigmaforge_web_search") {
     if (!webSearch) throw new Error("Controlled web search is not configured")
@@ -483,9 +567,121 @@ async function executeProviderTool(
   publish(sessionID, { type: "theory.updated", node: completed, version: theory.snapshot().version })
     return result
   } catch (error) {
-    const failed = theory.complete(node.id, { status: "error" })
-    publish(sessionID, { type: "theory.updated", node: failed, version: theory.snapshot().version })
+    if (node) {
+      const session = sessions.get(sessionID)
+      const failed = session.theory.snapshot().nodes[node.id]
+      if (failed?.status === "pending") {
+        const completed = session.theory.complete(failed.id, { status: "error" })
+        publish(sessionID, { type: "theory.updated", node: completed, version: session.theory.snapshot().version })
+      }
+    }
     throw error
+  }
+}
+
+function executeThinkingSummary(
+  sessionID: string,
+  sessions: SigmaForgeSessions,
+  publish: (sessionID: string, event: StreamEvent) => void,
+  input: unknown,
+) {
+  const request = thinkingSummarySchema.parse(input)
+  publish(sessionID, { type: "tool.start", tool: "thinking.summary", input: request })
+  const summary = sessions.addThinking(sessionID, request)
+  const snapshot = sessions.get(sessionID).thinking.snapshot()
+  publish(sessionID, { type: "tool.result", tool: "thinking.summary", result: { tool: "thinking.summary", text: `${summary.method}：${summary.reason}`, normalized: `${summary.method}：${summary.reason}`, durationMs: 0 } })
+  publish(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
+  return {
+    ok: true,
+    id: summary.id,
+    order: summary.order,
+    instruction: "摘要已记录；继续按该思路调用计算或验证工具。",
+  }
+}
+
+function executeThinkingRollback(
+  sessionID: string,
+  sessions: SigmaForgeSessions,
+  publish: (sessionID: string, event: StreamEvent) => void,
+  input: unknown,
+) {
+  const request = thinkingRollbackSchema.parse(input)
+  publish(sessionID, { type: "tool.start", tool: "thinking.rollback", input: request })
+  const result = sessions.rollbackThinking(sessionID, request.targetSummaryID)
+  const snapshot = sessions.get(sessionID).thinking.snapshot()
+  publish(sessionID, { type: "tool.result", tool: "thinking.rollback", result: { tool: "thinking.rollback", text: `已回滚 ${result.removed.length} 条摘要`, normalized: `已回滚 ${result.removed.length} 条摘要`, durationMs: 0 } })
+  publish(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
+  return {
+    ok: true,
+    removed: result.removed.map((item) => item.id),
+    remaining: result.summaries.length,
+    instruction: "已回滚错误摘要，请重新选择方法并记录新的思考摘要。",
+  }
+}
+
+function autoRecordThinkingSummary(
+  sessionID: string,
+  tool: string,
+  input: Record<string, unknown>,
+  sessions: SigmaForgeSessions,
+  publish: (sessionID: string, event: StreamEvent) => void,
+) {
+  const summary = thinkingSummaryForTool(tool, input)
+  if (!summary) return
+  const record = sessions.addThinking(sessionID, summary)
+  const snapshot = sessions.get(sessionID).thinking.snapshot()
+  publish(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
+}
+
+function thinkingSummaryForTool(tool: string, input: Record<string, unknown>) {
+  const expression = String(input.expression ?? input.equation ?? "")
+  const variable = String(input.variable ?? input.xVariable ?? "x")
+  const normalized = tool === "sigmaforge_plot_function2d"
+    ? "plot.function2d"
+    : tool === "sigmaforge_plot_surface3d"
+      ? "plot.surface3d"
+      : tool === "sigmaforge_geometry"
+        ? "geometry"
+        : tool.replace(/^sigmaforge_/, "")
+  switch (normalized) {
+    case "solve":
+      return { method: "求解方程", reason: expression ? `使用 solve 解 ${expression}，变量 ${variable}` : "使用 solve 求解当前方程", caution: "检查所有解是否满足原方程和定义域" }
+    case "integrate":
+      return { method: "计算积分", reason: expression ? `使用 integrate 对 ${expression} 关于 ${variable} 积分` : "使用 integrate 计算积分", caution: "不定积分记得加常数 C；定积分检查收敛性" }
+    case "diff":
+      return { method: "计算导数", reason: expression ? `使用 diff 计算 ${expression} 关于 ${variable} 的 ${input.order ?? 1} 阶导数` : "使用 diff 计算导数", caution: "复合函数检查链式法则，注意符号和括号" }
+    case "limit":
+      return { method: "计算极限", reason: expression ? `使用 limit 计算 ${expression} 在 ${input.point ?? "指定点"} 的极限` : "使用 limit 计算极限", caution: "区分左右极限和未定式，不能直接代入时换元或化简" }
+    case "simplify":
+      return { method: "化简表达式", reason: expression ? `使用 simplify 化简 ${expression}` : "使用 simplify 化简表达式", caution: "保持等价性，不能改变定义域" }
+    case "series":
+      return { method: "展开级数", reason: expression ? `使用 series 将 ${expression} 在 ${input.point ?? "指定点"} 展开` : "使用 series 展开级数", caution: "确认展开点和收敛范围" }
+    case "matrix":
+      return { method: "执行矩阵运算", reason: `使用 matrix 执行 ${input.operation ?? "矩阵运算"}`, caution: "确认矩阵尺寸和奇异矩阵情况" }
+    case "factor":
+      return { method: "因式分解", reason: expression ? `使用 factor 分解 ${expression}` : "使用 factor 因式分解", caution: "保留系数和符号的一致性" }
+    case "assume":
+      return { method: "设置数学假设", reason: expression ? `为当前会话设置假设 ${expression}` : "设置数学假设", caution: "假设必须只针对单一符号比较" }
+    case "eval":
+      return { method: "计算数学表达式", reason: expression ? `使用 eval 计算 ${expression}` : "使用 eval 计算表达式", caution: "只计算受限数学表达式，不执行 Python 语句" }
+    case "numeric":
+      return { method: "数值近似", reason: expression ? `使用 numeric 计算 ${expression} 的数值结果` : "使用 numeric 计算数值结果", caution: "明确保留位数，区分精确值与近似值" }
+    case "statistics":
+      return { method: "计算统计量", reason: `使用 statistics 执行 ${input.operation ?? "统计计算"}`, caution: "确认样本与总体定义，必要时报告样本量" }
+    case "distribution":
+      return { method: "计算概率分布", reason: `使用 distribution 计算 ${input.distribution ?? "分布"} 的 ${input.operation ?? "概率"}`, caution: "参数顺序必须与工具定义一致" }
+    case "hypothesis":
+      return { method: "执行假设检验", reason: `使用 hypothesis 执行 ${input.test ?? "假设检验"}`, caution: "报告检验名、备择假设、统计量和 p 值" }
+    case "verify":
+      return { method: "符号验证", reason: expression ? `使用 verify 验证 ${expression} 的符号等价性` : "使用 verify 验证符号等价性", caution: "只证明两式之差为 0，不自动覆盖定义域" }
+    case "plot.function2d":
+      return { method: "绘制二维函数图", reason: expression ? `使用 plot.function2d 绘制 ${expression}` : "使用 plot.function2d 绘图", caution: "选择合理显示范围，隐函数/极坐标使用对应坐标系统" }
+    case "plot.surface3d":
+      return { method: "绘制三维曲面", reason: expression ? `使用 plot.surface3d 绘制 ${expression}` : "使用 plot.surface3d 绘图", caution: "使用合理范围并保留坐标轴" }
+    case "geometry":
+      return { method: "构造平面几何图", reason: "使用 geometry 构造点、线段和圆", caution: "线段必须引用已定义的点，圆使用圆心和半径" }
+    default:
+      return undefined
   }
 }
 
@@ -515,6 +711,8 @@ function requireToolCallID(call: ProviderToolCall) {
 }
 
 function providerToolEventName(name: string) {
+  if (name === "sigmaforge_thinking_summary") return "thinking.summary"
+  if (name === "sigmaforge_thinking_rollback") return "thinking.rollback"
   if (name === "sigmaforge_verify") return "verify"
   if (name === "sigmaforge_plot_function2d") return "plot.function2d"
   if (name === "sigmaforge_plot_surface3d") return "plot.surface3d"
@@ -623,6 +821,8 @@ async function emitDefinitionReply(sessionID: string, sessions: SigmaForgeSessio
 function statusFor(error: unknown) {
   if (error instanceof ZodError || error instanceof SyntaxError) return 400
   if (error instanceof Error && error.message.startsWith("Session not found")) return 404
+  if (error instanceof Error && error.message.startsWith("Thinking summary not found")) return 404
+  if (error instanceof Error && error.message.startsWith("Thinking summary")) return 400
   if (error instanceof Error && error.message.startsWith("Session is already")) return 409
   if (error instanceof Error && (error.message.startsWith("Tool is disabled") || error.message.includes("unsafe"))) return 403
   return 502
