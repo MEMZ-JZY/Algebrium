@@ -3,7 +3,7 @@ import katex from "katex"
 import { marked } from "marked"
 import type Plotly from "plotly.js-basic-dist-min"
 import { type CSSProperties, FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react"
-import { askSigmaForge, createSession, deleteSession, getHealth, getProviderSettings, getSession, getTheory, listSessions, stopSigmaForge, updateProviderSettings, uploadSessionFile, type CASResult, type ContextSnapshot, type PlotArtifact, type ProcessHistoryEvent, type ProcessHistoryRun, type ProviderSettings, type Session, type SessionMessage, type StreamEvent, type TheoryNode, type VerificationResult, type WebSearchResult } from "./api"
+import { askSigmaForge, createSession, deleteSession, deleteThinkingSummary, getHealth, getProviderSettings, getSession, getTheory, getThinking, listSessions, rollbackThinkingSummary, stopSigmaForge, updateProviderSettings, updateThinkingSummary, uploadSessionFile, type CASResult, type ContextSnapshot, type PlotArtifact, type ProcessHistoryEvent, type ProcessHistoryRun, type ProviderSettings, type Session, type SessionMessage, type StreamEvent, type TheoryNode, type ThinkingSummary, type ThinkingSummaryInput, type VerificationResult, type WebSearchResult } from "./api"
 import { citationURL } from "./web-sources"
 import "katex/dist/katex.min.css"
 
@@ -44,6 +44,8 @@ export function App() {
   const [artifacts, setArtifacts] = useState<ArtifactState[]>([])
   const [webResults, setWebResults] = useState<WebSearchResult[]>([])
   const [theory, setTheory] = useState<Record<string, TheoryNode>>({})
+  const [thinkingSummaries, setThinkingSummaries] = useState<ThinkingSummary[]>([])
+  const [rightPanelTab, setRightPanelTab] = useState<"theory" | "thinking">("theory")
   const [selected, setSelected] = useState<string>()
   const [context, setContext] = useState<ContextSnapshot>()
   const [error, setError] = useState("")
@@ -107,6 +109,7 @@ export function App() {
     setArtifacts(detail.artifacts.map((artifact) => ({ id: artifact.id, title: String(artifact.meta.expression ?? "交互图形"), status: "ready", artifact })))
     setWebResults(detail.webResults)
     setTheory((await getTheory(id)).nodes)
+    setThinkingSummaries(detail.thinkingSummaries ?? [])
   }
 
   function newSession() {
@@ -124,6 +127,7 @@ export function App() {
     setVerifications([])
     setArtifacts([])
     setWebResults([])
+    setThinkingSummaries([])
     setSelected(undefined)
     setContext(undefined)
     setError("")
@@ -170,6 +174,7 @@ export function App() {
       setShowScrollToBottom(false)
       await askSigmaForge(session.current, message, applyEvent)
       setTheory((await getTheory(session.current)).nodes)
+      setThinkingSummaries((await getThinking(session.current)).summaries)
       const detail = await getSession(session.current)
       setHistory(detail.messages)
       setProcessRuns((current) => reconcileProcessRuns(current, detail.processRuns))
@@ -212,6 +217,24 @@ export function App() {
     }
   }
 
+  async function saveThinkingSummary(summaryID: string, input: ThinkingSummaryInput) {
+    if (!session.current) return
+    const result = await updateThinkingSummary(session.current, summaryID, input)
+    setThinkingSummaries(result.summaries)
+  }
+
+  async function removeThinkingSummary(summaryID: string) {
+    if (!session.current || !window.confirm("确定删除这条思考摘要吗？后续摘要会保留。")) return
+    const result = await deleteThinkingSummary(session.current, summaryID)
+    setThinkingSummaries(result.summaries)
+  }
+
+  async function rollbackToThinkingSummary(summaryID: string) {
+    if (!session.current || !window.confirm("确定从这条摘要开始回滚吗？这条及其后的摘要都会被删除。")) return
+    const result = await rollbackThinkingSummary(session.current, summaryID)
+    setThinkingSummaries(result.summaries)
+  }
+
   function applyEvent(event: StreamEvent) {
     if (event.type === "chunk") {
       setAnswer((current) => current + event.text)
@@ -248,6 +271,7 @@ export function App() {
       if (event.node.kind !== "problem" || event.node.id === "session-root") return
       setSelected(event.node.id)
     }
+    if (event.type === "thinking.updated") setThinkingSummaries(event.summaries)
     if (event.type === "error") {
       setError(event.message)
       setProcessRuns((current) => updateActiveProcessRun(current, (steps) => steps.map((step) => step.kind === "tools" ? { ...step, activities: step.activities.map((item) => item.status === "running" ? { ...item, status: "complete" } : item) } : step)))
@@ -315,7 +339,13 @@ export function App() {
       <header className="render-header"><div className="render-heading"><h2>{text.plots}</h2><span>{artifacts.length} {text.artifacts}</span></div><button type="button" className="icon-button" onClick={() => setRightCollapsed((value) => !value)} aria-label={rightCollapsed ? text.expandPlots : text.collapsePlots}>{rightCollapsed ? "‹" : "›"}</button></header>
       <div className="render-content" aria-hidden={rightCollapsed}>
         <div className="plot-gallery">{artifacts.length ? <ArtifactGallery items={artifacts} colorScheme={colorScheme} language={language} /> : <div className="render-empty"><span>⌁</span><strong>{text.noPlots}</strong><p>{text.noPlotsBody}</p></div>}</div>
-        <details className="theory-drawer"><summary>验证路径</summary><TheoryTree nodes={theory} selected={selected} onSelect={setSelected} /></details>
+        <div className="right-panel-tabs" role="tablist" aria-label={language === "zh" ? "右侧面板" : "Right panel"}>
+          <button type="button" role="tab" aria-selected={rightPanelTab === "theory"} className={rightPanelTab === "theory" ? "active" : ""} onClick={() => setRightPanelTab("theory")}>{language === "zh" ? "验证路径" : "Verification"}</button>
+          <button type="button" role="tab" aria-selected={rightPanelTab === "thinking"} className={rightPanelTab === "thinking" ? "active" : ""} onClick={() => setRightPanelTab("thinking")}>{language === "zh" ? "思考路线摘要" : "Thinking"}</button>
+        </div>
+        {rightPanelTab === "theory"
+          ? <div className="theory-drawer"><TheoryTree nodes={theory} selected={selected} onSelect={setSelected} /></div>
+          : <ThinkingSummaryPanel summaries={thinkingSummaries} language={language} onSave={saveThinkingSummary} onDelete={removeThinkingSummary} onRollback={rollbackToThinkingSummary} />}
       </div>
     </aside>
     {settingsOpen && <SettingsPanel language={language} theme={theme} text={text} onLanguage={setLanguage} onTheme={setTheme} onClose={() => setSettingsOpen(false)} />}
@@ -649,8 +679,10 @@ function toolLabel(tool: string, language: Language) {
     "geometry.construct": "构造平面几何图",
     verify: "验证符号等价性",
     "web.search": "搜索数学资料",
+    "thinking.summary": "记录思考摘要",
+    "thinking.rollback": "回滚思考路线",
   }
-  const labelsEn: Record<string, string> = { integrate: "Calculate integral", diff: "Calculate derivative", solve: "Solve equation", simplify: "Simplify expression", factor: "Factor expression", limit: "Calculate limit", series: "Calculate series", matrix: "Run matrix operation", assume: "Set assumptions", eval: "Evaluate expression", numeric: "Numerical approximation", statistics: "Calculate statistics", distribution: "Calculate distribution", hypothesis: "Run hypothesis test", "plot.function2d": "Plot 2D function", "plot.surface3d": "Plot 3D surface", "geometry.construct": "Construct plane geometry", verify: "Verify symbolic equivalence", "web.search": "Search math sources" }
+  const labelsEn: Record<string, string> = { integrate: "Calculate integral", diff: "Calculate derivative", solve: "Solve equation", simplify: "Simplify expression", factor: "Factor expression", limit: "Calculate limit", series: "Calculate series", matrix: "Run matrix operation", assume: "Set assumptions", eval: "Evaluate expression", numeric: "Numerical approximation", statistics: "Calculate statistics", distribution: "Calculate distribution", hypothesis: "Run hypothesis test", "plot.function2d": "Plot 2D function", "plot.surface3d": "Plot 3D surface", "geometry.construct": "Construct plane geometry", verify: "Verify symbolic equivalence", "web.search": "Search math sources", "thinking.summary": "Record thinking summary", "thinking.rollback": "Roll back thinking path" }
   return (language === "zh" ? labelsZh : labelsEn)[tool] ?? tool
 }
 
@@ -906,4 +938,57 @@ function TheoryTree({ nodes, selected, onSelect }: { nodes: Record<string, Theor
   const children = (node: TheoryNode) => node.children.map((id) => nodes[id]).filter((child): child is TheoryNode => Boolean(child))
   const renderNode = (node: TheoryNode): ReactNode => <li key={node.id}><button className={`theory-node ${node.status} ${selected === node.id ? "selected" : ""}`} onClick={() => onSelect(node.id)}><span>{node.status === "verified" ? "✓" : node.status === "rejected" ? "✗" : node.status === "error" ? "!" : "…"}</span>{node.title}</button>{node.children.length > 0 && <ul>{children(node).map(renderNode)}</ul>}{selected === node.id && <div className="node-detail"><p>{node.content}</p>{node.rule && <p>依据：{node.rule}</p>}{node.expression && <code>{node.expression}</code>}{node.verification && <pre>{node.verification.evidence}</pre>}{node.artifactIDs.length > 0 && <small>产物：{node.artifactIDs.join(", ")}</small>}</div>}</li>
   return <ul className="theory-tree">{children(root).map(renderNode)}</ul>
+}
+
+function ThinkingSummaryPanel({ summaries, language, onSave, onDelete, onRollback }: {
+  summaries: ThinkingSummary[]
+  language: Language
+  onSave: (id: string, input: ThinkingSummaryInput) => Promise<void>
+  onDelete: (id: string) => Promise<void>
+  onRollback: (id: string) => Promise<void>
+}) {
+  if (!summaries.length) {
+    return <p className="placeholder">{language === "zh" ? "模型选择方法或计算时，会在这里生成思考摘要。" : "Thinking summaries will appear here as the model chooses methods."}</p>
+  }
+  return <div className="thinking-summary-list">{summaries.map((summary) => <ThinkingSummaryCard key={summary.id} summary={summary} language={language} onSave={onSave} onDelete={onDelete} onRollback={onRollback} />)}</div>
+}
+
+function ThinkingSummaryCard({ summary, language, onSave, onDelete, onRollback }: {
+  summary: ThinkingSummary
+  language: Language
+  onSave: (id: string, input: ThinkingSummaryInput) => Promise<void>
+  onDelete: (id: string) => Promise<void>
+  onRollback: (id: string) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState({ method: summary.method, reason: summary.reason, caution: summary.caution })
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    await onSave(summary.id, { method: draft.method, reason: draft.reason, caution: draft.caution })
+    setEditing(false)
+  }
+
+  return <article className="thinking-summary">
+    <header>
+      <span>{language === "zh" ? `步骤 ${summary.order}` : `Step ${summary.order}`}</span>
+      <div className="thinking-summary-actions">
+        {!editing && <button type="button" onClick={() => { setDraft({ method: summary.method, reason: summary.reason, caution: summary.caution }); setEditing(true) }} title={language === "zh" ? "编辑摘要" : "Edit summary"}>{language === "zh" ? "编辑" : "Edit"}</button>}
+        <button type="button" onClick={() => void onRollback(summary.id)} title={language === "zh" ? "回滚到此" : "Roll back here"}>{language === "zh" ? "回滚" : "Rollback"}</button>
+        <button type="button" onClick={() => void onDelete(summary.id)} title={language === "zh" ? "删除摘要" : "Delete summary"}>{language === "zh" ? "删除" : "Delete"}</button>
+      </div>
+    </header>
+    {editing
+      ? <form className="thinking-summary-edit" onSubmit={submit}>
+          <label><span>{language === "zh" ? "方法" : "Method"}</span><input value={draft.method} onChange={(event) => setDraft((current) => ({ ...current, method: event.target.value }))} required maxLength={120} /></label>
+          <label><span>{language === "zh" ? "理由" : "Reason"}</span><textarea value={draft.reason} onChange={(event) => setDraft((current) => ({ ...current, reason: event.target.value }))} required maxLength={300} rows={3} /></label>
+          <label><span>{language === "zh" ? "注意" : "Caution"}</span><textarea value={draft.caution} onChange={(event) => setDraft((current) => ({ ...current, caution: event.target.value }))} maxLength={300} rows={2} /></label>
+          <div className="thinking-summary-edit-actions"><button type="submit">{language === "zh" ? "保存" : "Save"}</button><button type="button" onClick={() => setEditing(false)}>{language === "zh" ? "取消" : "Cancel"}</button></div>
+        </form>
+      : <div className="thinking-summary-body">
+          <h4>{summary.method}</h4>
+          <p><strong>{language === "zh" ? "为什么：" : "Why: "}</strong>{summary.reason}</p>
+          {summary.caution && <p><strong>{language === "zh" ? "注意：" : "Caution: "}</strong>{summary.caution}</p>}
+        </div>}
+  </article>
 }

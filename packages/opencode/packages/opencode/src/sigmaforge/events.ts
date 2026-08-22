@@ -7,6 +7,7 @@ import type { KBSearchResult } from "./kb"
 import type { MistakeAttribution } from "./attribution"
 import type { LearningPathNode } from "./learning-path"
 import type { WebSearchResult } from "./web-search"
+import type { ThinkingSummary } from "./thinking"
 
 export type StreamEvent =
   | { type: "chunk"; text: string }
@@ -19,6 +20,7 @@ export type StreamEvent =
   | { type: "artifact.pending"; artifact: { id: string; kind: PlotArtifact["kind"]; title: string } }
   | { type: "verification"; result: VerificationResult }
   | { type: "theory.updated"; node: TheoryNode; version: number }
+  | { type: "thinking.updated"; version: number; summaries: ThinkingSummary[] }
   | { type: "kb.result"; entries: KBSearchResult[] }
   | { type: "mistake.attributed"; attribution: MistakeAttribution }
   | { type: "learning.path"; nodes: LearningPathNode[] }

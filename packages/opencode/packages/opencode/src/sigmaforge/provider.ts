@@ -1,7 +1,7 @@
 import { z } from "zod"
 import type { ProviderContext } from "./context"
 
-export const ProviderIDSchema = z.enum(["deepseek", "mimo", "kimi", "volcengine", "openrouter", "siliconflow", "custom"])
+export const ProviderIDSchema = z.enum(["deepseek", "mimo", "kimi", "volcengine", "openrouter", "siliconflow", "qwen", "custom"])
 
 export const ProviderConfigSchema = z.object({
   provider: ProviderIDSchema,
@@ -45,6 +45,7 @@ const baseURLs: Record<z.infer<typeof ProviderIDSchema>, string | undefined> = {
   volcengine: "https://ark.cn-beijing.volces.com/api/v3",
   openrouter: "https://openrouter.ai/api/v1",
   siliconflow: "https://api.siliconflow.com/v1",
+  qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   custom: undefined,
 }
 

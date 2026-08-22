@@ -5,6 +5,7 @@ import type { TheoryTree } from "./theory"
 import type { PlotArtifact } from "./plot"
 import type { WebSearchResult } from "./web-search"
 import type { CASResult } from "./cas"
+import { ThinkingSummaryStore, type ThinkingSummarySnapshot } from "./thinking"
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 
@@ -34,6 +35,7 @@ export type SigmaForgeSession = {
   updatedAt: number
   messages: SigmaForgeMessage[]
   theory: TheoryTreeStore
+  thinking: ThinkingSummaryStore
   artifacts: PlotArtifact[]
   webResults: WebSearchResult[]
   processRuns: ProcessHistoryRun[]
@@ -64,6 +66,7 @@ export class SigmaForgeSessions {
       updatedAt: Date.now(),
       messages: [],
       theory,
+      thinking: new ThinkingSummaryStore(),
       artifacts: [],
       webResults: [],
       processRuns: [],
@@ -137,6 +140,30 @@ export class SigmaForgeSessions {
     this.persist()
   }
 
+  addThinking(id: string, input: { method: string; reason: string; caution?: string }) {
+    const summary = this.get(id).thinking.add(input)
+    this.persist()
+    return summary
+  }
+
+  updateThinking(id: string, summaryID: string, input: { method?: string; reason?: string; caution?: string }) {
+    const summary = this.get(id).thinking.update(summaryID, input)
+    this.persist()
+    return summary
+  }
+
+  removeThinking(id: string, summaryID: string) {
+    const result = this.get(id).thinking.remove(summaryID)
+    this.persist()
+    return result
+  }
+
+  rollbackThinking(id: string, summaryID?: string) {
+    const result = this.get(id).thinking.rollbackTo(summaryID)
+    this.persist()
+    return result
+  }
+
   context(id: string) {
     const session = this.get(id)
     const context = this.contexts.build(session)
@@ -164,7 +191,7 @@ export class SigmaForgeSessions {
   private restore() {
     if (!this.storagePath) return
     try {
-      const records = JSON.parse(readFileSync(this.storagePath, "utf8")) as Array<Pick<SigmaForgeSession, "id" | "subject" | "systemPrompt" | "createdAt" | "updatedAt" | "messages"> & { theory?: TheoryTree; artifacts?: PlotArtifact[]; webResults?: WebSearchResult[]; processRuns?: ProcessHistoryRun[] }>
+      const records = JSON.parse(readFileSync(this.storagePath, "utf8")) as Array<Pick<SigmaForgeSession, "id" | "subject" | "systemPrompt" | "createdAt" | "updatedAt" | "messages"> & { theory?: TheoryTree; thinking?: ThinkingSummarySnapshot; artifacts?: PlotArtifact[]; webResults?: WebSearchResult[]; processRuns?: ProcessHistoryRun[] }>
       if (!Array.isArray(records)) throw new Error("Session history must be an array")
       for (const record of records) {
         const theory = new TheoryTreeStore(record.id, record.theory)
@@ -172,6 +199,7 @@ export class SigmaForgeSessions {
         this.sessions.set(record.id, {
           ...record,
           theory,
+          thinking: new ThinkingSummaryStore(record.thinking),
           artifacts: Array.isArray(record.artifacts) ? record.artifacts.filter(isPlotArtifact) : [],
           webResults: Array.isArray(record.webResults) ? record.webResults.filter(isWebSearchResult) : [],
           processRuns: Array.isArray(record.processRuns) ? record.processRuns.filter(isProcessHistoryRun) : [],
@@ -190,7 +218,7 @@ export class SigmaForgeSessions {
   private persist() {
     if (!this.storagePath) return
     mkdirSync(dirname(this.storagePath), { recursive: true })
-    const records = this.list().map(({ id, subject, systemPrompt, createdAt, updatedAt, messages, theory, artifacts, webResults, processRuns }) => ({ id, subject, systemPrompt, createdAt, updatedAt, messages, theory: theory.snapshot(), artifacts, webResults, processRuns }))
+    const records = this.list().map(({ id, subject, systemPrompt, createdAt, updatedAt, messages, theory, thinking, artifacts, webResults, processRuns }) => ({ id, subject, systemPrompt, createdAt, updatedAt, messages, theory: theory.snapshot(), thinking: thinking.snapshot(), artifacts, webResults, processRuns }))
     const temporary = `${this.storagePath}.tmp`
     writeFileSync(temporary, JSON.stringify(records, null, 2), "utf8")
     renameSync(temporary, this.storagePath)
