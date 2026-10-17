@@ -636,3 +636,61 @@ figure img { background: #fff; }
   background: rgba(0, 113, 227, .08);
   font-size: 12px;
 }
+
+/* Reasoning level picker in the composer */
+.reasoning-picker {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 0 4px 0 8px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--text-secondary);
+  background: var(--surface-secondary);
+  font-size: 12px;
+}
+
+.reasoning-picker-label {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.reasoning-picker select {
+  height: 24px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 6px;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.reasoning-picker select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.reasoning-picker:hover {
+  border-color: var(--line-strong);
+}
+
+/* A trimmed thinking stage waiting for its summary */
+.reasoning-block.summarizing > summary {
+  color: var(--text-secondary);
+}
+
+.reasoning-block.summarizing .reasoning-dot {
+  background: var(--accent);
+  animation: reasoning-pulse 1.2s ease-in-out infinite;
+}
+
+.reasoning-pending {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}

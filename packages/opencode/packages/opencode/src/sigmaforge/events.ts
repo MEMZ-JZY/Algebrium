@@ -21,6 +21,7 @@ export type StreamEvent =
   | { type: "verification"; result: VerificationResult }
   | { type: "theory.updated"; node: TheoryNode; version: number }
   | { type: "thinking.updated"; version: number; summaries: ThinkingSummary[] }
+  | { type: "thinking.marker" }
   | { type: "kb.result"; entries: KBSearchResult[] }
   | { type: "mistake.attributed"; attribution: MistakeAttribution }
   | { type: "learning.path"; nodes: LearningPathNode[] }

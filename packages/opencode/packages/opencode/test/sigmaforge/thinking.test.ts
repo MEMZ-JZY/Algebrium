@@ -1,12 +1,26 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { startSigmaForgeServer } from "@/sigmaforge/server"
-import { ThinkingSummaryStore } from "@/sigmaforge/thinking"
+import { stripStageMarkers, ThinkingMarkerReader, ThinkingSummaryStore } from "@/sigmaforge/thinking"
 
 let server: ReturnType<typeof startSigmaForgeServer> | undefined
 
 afterEach(() => {
   void server?.stop(true)
   server = undefined
+})
+
+describe("ThinkingMarkerReader", () => {
+  test("detects markers split across streaming chunks", () => {
+    const reader = new ThinkingMarkerReader()
+    expect(reader.push("先算积分。\n[[STA")).toEqual({ text: "先算积分。\n", markers: 0 })
+    expect(reader.push("GE]]\n接着验证。")).toEqual({ text: "\n接着验证。", markers: 1 })
+    expect(reader.flush()).toEqual({ text: "", markers: 0 })
+  })
+
+  test("removes marker lines from persisted answers", () => {
+    expect(stripStageMarkers("引言\n[[STAGE]]\n答案")).toBe("引言\n答案")
+    expect(stripStageMarkers("[[STAGE]]回答")).toBe("回答")
+  })
 })
 
 describe("ThinkingSummaryStore", () => {
@@ -90,19 +104,18 @@ describe("thinking summary server API", () => {
     expect(removed.summaries).toEqual([])
   })
 
-  test("executes model thinking summary and rollback tools", async () => {
-    let round = 0
+  test("streams thinking markers without leaking them into the answer", async () => {
     const requests: Array<{ tools?: Array<{ function: { name: string } }> }> = []
     const provider = {
-      id: "thinking-test",
-      model: "thinking-test-model",
-      async stream(request: { tools?: Array<{ function: { name: string } }> }, onChunk: (text: string) => void) {
+      id: "marker-test",
+      model: "marker-test-model",
+      async stream(request: { tools?: Array<{ function: { name: string } }> }, onChunk: (text: string) => void, onReasoning?: (text: string) => void) {
         requests.push(request)
-        round++
-        if (round === 1) return { content: "", toolCalls: [{ id: "summary", name: "sigmaforge_thinking_summary", arguments: '{"method":"integration by parts","reason":"x times e^x is a product","caution":"watch signs"}' }] }
-        if (round === 2) return { content: "", toolCalls: [{ id: "rollback", name: "sigmaforge_thinking_rollback", arguments: '{"reason":"wrong direction"}' }] }
-        onChunk("corrected path complete")
-        return { content: "corrected path complete", toolCalls: [] }
+        onReasoning?.("先判断被积函数结构。")
+        onChunk("[[STA")
+        onChunk("GE]]")
+        onChunk("回答完毕")
+        return { content: "[[STAGE]]回答完毕", toolCalls: [] }
       },
     }
     server = startSigmaForgeServer({ port: 0, mockProvider: false, provider })
@@ -111,18 +124,19 @@ describe("thinking summary server API", () => {
     const session = (await created.json()) as { id: string }
     const events = fetch(`${origin}/sessions/${session.id}/events`)
     await Bun.sleep(10)
-    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "solve with thinking" }) })
+    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "solve with markers", reasoning: "high" }) })
     const stream = await (await events).text()
-    expect(stream).toContain('"type":"thinking.updated"')
-    expect(stream).toContain('"method":"integration by parts"')
-    expect(stream).toContain('"type":"tool.result","tool":"thinking.summary"')
-    expect(stream).toContain('"type":"tool.result","tool":"thinking.rollback"')
-    expect(requests[0]?.tools?.some((tool) => tool.function.name === "sigmaforge_thinking_summary")).toBe(true)
-    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { thinkingSummaries: unknown[] }
+    expect(stream.match(/"type":"thinking.marker"/g)?.length).toBe(1)
+    expect(stream).toContain("先判断被积函数结构。")
+    expect(stream).toContain("回答完毕")
+    expect(stream).not.toContain("STAGE")
+    expect(requests[0]?.tools?.some((tool) => tool.function.name === "sigmaforge_thinking_summary")).toBe(false)
+    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { messages: Array<{ role: string; content: string }>; thinkingSummaries: unknown[] }
+    expect(detail.messages.at(-1)?.content).toBe("回答完毕")
     expect(detail.thinkingSummaries).toEqual([])
   })
 
-  test("auto-records summaries for computational tools when the model omits them", async () => {
+  test("does not auto-record summaries for computational tools", async () => {
     let round = 0
     const provider = {
       id: "auto-thinking-test",
@@ -153,46 +167,52 @@ describe("thinking summary server API", () => {
     const events = fetch(`${origin}/sessions/${session.id}/events`)
     await Bun.sleep(10)
     await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "solve with tools" }) })
-    const stream = await (await events).text()
-    expect(stream).toContain('"type":"thinking.updated"')
-    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { thinkingSummaries: Array<{ method: string }> }
-    expect(detail.thinkingSummaries.map((item) => item.method)).toEqual(["计算导数", "计算数学表达式"])
+    await (await events).text()
+    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { thinkingSummaries: unknown[] }
+    expect(detail.thinkingSummaries).toEqual([])
   })
 
-  test("only auto-records tools not already covered by a model summary", async () => {
-    let round = 0
+  test("summarizes trimmed thinking in an isolated model session", async () => {
+    const requests: Array<{ messages?: Array<{ role: string; content: string | null }>; tools?: unknown; reasoning?: string; maxTokens?: number }> = []
     const provider = {
-      id: "covered-thinking-test",
-      model: "covered-thinking-test-model",
-      async stream(_request: unknown, onChunk: (text: string) => void) {
-        round++
-        if (round === 1) return {
-          content: "",
-          toolCalls: [
-            { id: "summary", name: "sigmaforge_thinking_summary", arguments: '{"method":"求导","reason":"先分析函数变化","caution":"注意链式法则"}' },
-            { id: "diff", name: "sigmaforge_diff", arguments: '{"expression":"x^2","variable":"x"}' },
-            { id: "eval", name: "sigmaforge_eval", arguments: '{"expression":"2^3"}' },
-          ],
-        }
-        onChunk("done")
-        return { content: "done", toolCalls: [] }
+      id: "summarizer-test",
+      model: "summarizer-test-model",
+      async stream(request: { messages?: Array<{ role: string; content: string | null }>; tools?: unknown; reasoning?: string; maxTokens?: number }, onChunk: (text: string) => void) {
+        requests.push(request)
+        onChunk('```json\n{"method":"分部积分","reason":"两项相乘适合分部","caution":"注意符号"}\n```')
+        return { content: "summarized", toolCalls: [] }
       },
     }
-    const kernel = {
-      async execute() {
-        return { text: "ok", images: [] }
-      },
-      async reset() {},
-    }
-    server = startSigmaForgeServer({ port: 0, mockProvider: false, provider, kernel })
+    server = startSigmaForgeServer({ port: 0, mockProvider: false, provider })
     const origin = `http://${server.hostname}:${server.port}`
-    const created = await fetch(`${origin}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
-    const session = (await created.json()) as { id: string }
-    const events = fetch(`${origin}/sessions/${session.id}/events`)
-    await Bun.sleep(10)
-    await fetch(`${origin}/sessions/${session.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "solve with mixed summaries" }) })
-    await (await events).text()
-    const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { thinkingSummaries: Array<{ method: string }> }
-    expect(detail.thinkingSummaries.map((item) => item.method)).toEqual(["求导", "计算数学表达式"])
+    const response = await fetch(`${origin}/thinking/summarize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "把 x 与 e^x 分开处理，先用分部积分。" }),
+    })
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { summary: { method: string; reason: string; caution: string }; degraded: boolean }
+    expect(body.degraded).toBe(false)
+    expect(body.summary).toEqual({ method: "分部积分", reason: "两项相乘适合分部", caution: "注意符号" })
+    expect(requests[0]?.tools).toBeUndefined()
+    expect(requests[0]?.reasoning).toBe("none")
+    expect(requests[0]?.messages?.length).toBe(2)
+    expect(requests[0]?.messages?.[0]?.role).toBe("system")
+    expect(requests[0]?.messages?.[1]?.content).toContain("分部积分")
+  })
+
+  test("falls back to a local summary when no real provider is configured", async () => {
+    server = startSigmaForgeServer({ port: 0 })
+    const origin = `http://${server.hostname}:${server.port}`
+    const response = await fetch(`${origin}/thinking/summarize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "先判断被积函数结构。再决定方法。" }),
+    })
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { summary: { method: string; reason: string }; degraded: boolean }
+    expect(body.degraded).toBe(true)
+    expect(body.summary.method).toBe("思考阶段")
+    expect(body.summary.reason).toContain("先判断被积函数结构")
   })
 })

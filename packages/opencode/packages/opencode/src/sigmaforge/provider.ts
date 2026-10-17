@@ -3,6 +3,12 @@ import type { ProviderContext } from "./context"
 
 export const ProviderIDSchema = z.enum(["deepseek", "mimo", "kimi", "volcengine", "openrouter", "siliconflow", "qwen", "custom"])
 
+// Reasoning effort levels exposed by the composer. The values match the
+// `reasoning_effort` field accepted by OpenAI-compatible providers such as
+// DeepSeek; "none" disables thinking for models that support it.
+export const reasoningLevels = ["none", "low", "medium", "high", "xhigh", "max", "ultra"] as const
+export type ReasoningLevel = (typeof reasoningLevels)[number]
+
 export const ProviderConfigSchema = z.object({
   provider: ProviderIDSchema,
   model: z.string().min(1),
@@ -29,7 +35,7 @@ export type ProviderMessage =
   | { role: "user" | "system"; content: string }
   | { role: "assistant"; content: string | null; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }
   | { role: "tool"; tool_call_id: string; content: string }
-export type ProviderRequest = { context: ProviderContext; messages?: ProviderMessage[]; tools?: ProviderTool[]; signal?: AbortSignal }
+export type ProviderRequest = { context: ProviderContext; messages?: ProviderMessage[]; tools?: ProviderTool[]; signal?: AbortSignal; reasoning?: ReasoningLevel; maxTokens?: number }
 export type ProviderTurn = { content: string; toolCalls: ProviderToolCall[] }
 
 export interface ChatProvider {
@@ -73,7 +79,8 @@ export class OpenAICompatibleProvider implements ChatProvider {
         messages: request.messages ?? [{ role: "user", content: request.context.prompt }],
         stream: true,
         ...(request.tools?.length ? { tools: request.tools, tool_choice: "auto" } : {}),
-        max_tokens: this.config.maxTokens,
+        max_tokens: request.maxTokens ?? this.config.maxTokens,
+        ...(request.reasoning ? { reasoning_effort: request.reasoning } : {}),
         ...(this.config.temperature === undefined ? {} : { temperature: this.config.temperature }),
       }),
       signal: request.signal

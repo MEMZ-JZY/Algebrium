@@ -42,6 +42,12 @@ export type TheoryTree = { sessionID: string; rootID?: string; version: number; 
 export type ThinkingSummary = { id: string; order: number; method: string; reason: string; caution: string; createdAt: number; updatedAt: number }
 export type ThinkingSummarySnapshot = { version: number; summaries: ThinkingSummary[] }
 export type ThinkingSummaryInput = { method?: string; reason?: string; caution?: string }
+export type ThinkingSummaryDraft = { method: string; reason: string; caution: string }
+
+// Reasoning effort levels offered by the composer; the values are forwarded to
+// the provider as `reasoning_effort` ("none" turns thinking off).
+export const reasoningLevels = ["none", "low", "medium", "high", "xhigh", "max", "ultra"] as const
+export type ReasoningLevel = (typeof reasoningLevels)[number]
 export type ProviderProfile = { id: string; provider: string; model: string; baseURL?: string; apiKeyEnv: string; hasApiKey: boolean }
 export type ProviderSettings = { active: string; profiles: Record<string, ProviderProfile> }
 export type ProviderSettingsInput = { id: string; provider: string; model: string; baseURL?: string; apiKey?: string }
@@ -57,6 +63,7 @@ export type StreamEvent =
   | { type: "verification"; result: VerificationResult }
   | { type: "theory.updated"; node: TheoryNode; version: number }
   | { type: "thinking.updated"; version: number; summaries: ThinkingSummary[] }
+  | { type: "thinking.marker" }
   | { type: "web.result"; result: WebSearchResult }
   | { type: "error"; message: string }
   | { type: "done"; context: ContextSnapshot }
@@ -71,6 +78,25 @@ export function getTheory(sessionID: string) {
 
 export function getThinking(sessionID: string) {
   return request<ThinkingSummarySnapshot>(`/sessions/${sessionID}/thinking`)
+}
+
+export function createThinkingSummary(sessionID: string, input: ThinkingSummaryDraft) {
+  return request<{ ok: boolean; summary: ThinkingSummary; summaries: ThinkingSummary[]; version: number }>(`/sessions/${sessionID}/thinking`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  })
+}
+
+/**
+ * Summarizes one trimmed reasoning stage. The backend runs it in its own
+ * isolated conversation on the same model, so the main chat session is not
+ * charged for the summary and its stream never waits for it.
+ */
+export function summarizeThinking(text: string) {
+  return request<{ ok: boolean; summary: ThinkingSummaryDraft; degraded: boolean }>("/thinking/summarize", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  })
 }
 
 export function updateThinkingSummary(sessionID: string, summaryID: string, input: ThinkingSummaryInput) {
@@ -130,7 +156,7 @@ export function updateProviderSettings(input: ProviderSettingsInput) {
   return request<ProviderSettings>("/settings/provider", { method: "PUT", body: JSON.stringify(input) })
 }
 
-export async function askSigmaForge(sessionID: string, message: string, onEvent: (event: StreamEvent) => void) {
+export async function askSigmaForge(sessionID: string, message: string, onEvent: (event: StreamEvent) => void, reasoning?: ReasoningLevel) {
   const events = new EventSource(`${origin}/sessions/${sessionID}/events`)
   await new Promise<void>((resolve, reject) => {
     events.onopen = () => resolve()
@@ -152,7 +178,7 @@ export async function askSigmaForge(sessionID: string, message: string, onEvent:
     }
   })
   try {
-    await request(`/sessions/${sessionID}/messages`, { method: "POST", body: JSON.stringify({ message }) })
+    await request(`/sessions/${sessionID}/messages`, { method: "POST", body: JSON.stringify({ message, ...(reasoning ? { reasoning } : {}) }) })
   } catch (error) {
     events.close()
     throw error
