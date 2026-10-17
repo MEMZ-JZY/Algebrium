@@ -15,6 +15,7 @@ import type { KnowledgeBaseReader, MistakeSink } from "./kb"
 import { reasoningLevels, type ChatProvider, type ProviderMessage, type ProviderToolCall, type ReasoningLevel } from "./provider"
 import { mathProviderTools } from "./provider-tools"
 import { stripStageMarkers, ThinkingMarkerReader } from "./thinking"
+import { ThinkingJobs, summarizeThinking } from "./thinking-jobs"
 import { WebSearchRequestSchema, type WebSearchClient } from "./web-search"
 
 const providerGuidelines = Bun.file(new URL("./provider-guidelines.md", import.meta.url)).text()
@@ -44,14 +45,6 @@ const thinkingSummarizeSchema = z.object({
   text: z.string().min(1).max(40000),
   sessionID: z.string().optional(),
 })
-
-// The client trims the raw reasoning around a thinking marker and posts each
-// trimmed stage here. The summarizer runs in its own isolated conversation on
-// the same model, so the main session keeps its context and its latency.
-const summarizerGuidelines = `你是 Algebrium 的思考摘要器。输入是数学推理过程的一个片段，你要把它压缩成一条可复用的阶段摘要。
-只输出一个 JSON 对象，不要输出代码块、解释或多余文字：
-{"method":"正在做什么（不超过 20 字）","reason":"为什么这样做（不超过 60 字）","caution":"需要注意什么（不超过 40 字，没有就留空字符串）"}
-要求：只概括片段里已经出现的信息，不新增结论、不评价对错、不使用 Markdown。`
 
 export type SigmaForgeServerOptions = {
   hostname?: string
@@ -91,7 +84,22 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
       }
     }
   }
+  const thinkingJobs = new ThinkingJobs(sessions, (sessionID) => {
+    const snapshot = sessions.get(sessionID).thinking.snapshot()
+    broadcast(sessionID, { type: "thinking.updated", ...snapshot })
+  })
   const publish = (sessionID: string, event: StreamEvent) => {
+    if (event.type === "reasoning.chunk") event = thinkingJobs.reasoning(sessionID, event.text)
+    if (event.type === "thinking.marker") {
+      const marker = thinkingJobs.close(sessionID) ?? (event.summaryID ? event : undefined)
+      if (!marker) return
+      event = marker
+    }
+    if (event.type === "done") {
+      const marker = thinkingJobs.close(sessionID)
+      if (marker) publish(sessionID, marker)
+      thinkingJobs.end(sessionID)
+    }
     if (event.type === "done") {
       const finalMessage = sessions.get(sessionID).messages.at(-1)
       if (finalMessage?.role === "assistant") {
@@ -179,6 +187,8 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const sessionID = sessionDetail[1]!
           await kernel.reset?.(sessionID)
           sessions.delete(sessionID)
+          thinkingJobs.cancel(sessionID)
+          thinkingJobs.end(sessionID)
           return Response.json({ deleted: true }, { headers })
         } catch (error) {
           return jsonError(error, statusFor(error), headers)
@@ -203,9 +213,10 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
         }
       }
 
-      const events = url.pathname.match(/^\/sessions\/([^/]+)\/events$/)
+      const events = url.pathname.match(/^\/sessions\/([^/]+)\/(thinking\/)?events$/)
       if (request.method === "GET" && events) {
         const sessionID = events[1]!
+        const thinkingOnly = Boolean(events[2])
         try {
           sessions.get(sessionID)
         } catch (error) {
@@ -231,8 +242,9 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
             listener = (event: StreamEvent) => {
               if (closed) return
               try {
+                if (thinkingOnly && event.type !== "thinking.updated") return
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
-                if (event.type !== "done") return
+                if (thinkingOnly || event.type !== "done") return
                 cleanup()
                 controller.close()
               } catch {
@@ -242,6 +254,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
             const current = listeners.get(sessionID) ?? new Set()
             current.add(listener)
             listeners.set(sessionID, current)
+            if (thinkingOnly) listener({ type: "thinking.updated", ...sessions.get(sessionID).thinking.snapshot() })
           },
           cancel() { cleanup() },
         })
@@ -285,6 +298,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const input = (await request.json()) as { targetSummaryID?: string; reason?: string }
           const parsed = thinkingRollbackSchema.parse({ ...input, reason: input.reason ?? "Manual rollback" })
           const result = sessions.rollbackThinking(sessionID, parsed.targetSummaryID)
+          thinkingJobs.invalidate(sessionID)
           const snapshot = sessions.get(sessionID).thinking.snapshot()
           broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
           return Response.json({ ok: true, removed: result.removed.map((item) => item.id), summaries: snapshot.summaries, version: snapshot.version }, { headers })
@@ -300,6 +314,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const summaryID = thinkingItem[2]!
           const input = (await request.json()) as { method?: string; reason?: string; caution?: string }
           const summary = sessions.updateThinking(sessionID, summaryID, input)
+          thinkingJobs.invalidate(sessionID)
           const snapshot = sessions.get(sessionID).thinking.snapshot()
           broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
           return Response.json({ ok: true, summary, summaries: snapshot.summaries, version: snapshot.version }, { headers })
@@ -312,6 +327,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const sessionID = thinkingItem[1]!
           const summaryID = thinkingItem[2]!
           const result = sessions.removeThinking(sessionID, summaryID)
+          thinkingJobs.invalidate(sessionID)
           const snapshot = sessions.get(sessionID).thinking.snapshot()
           broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
           return Response.json({ ok: true, removed: result.removed.id, summaries: snapshot.summaries, version: snapshot.version }, { headers })
@@ -384,7 +400,8 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const controller = new AbortController()
           requests.set(sessionID, controller)
           const userMessage = sessions.append(sessionID, "user", input.message)
-          sessions.startProcess(sessionID, userMessage.createdAt)
+          const run = sessions.startProcess(sessionID, userMessage.createdAt)
+          thinkingJobs.begin(sessionID, run.id, mockProvider ? undefined : activeProvider)
           const providerContext = sessions.context(sessionID)
           options.onContext?.(providerContext)
           const reply = mockProvider
@@ -407,6 +424,8 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           sessions.get(stop[1]!)
           const controller = requests.get(stop[1]!)
           if (controller) controller.abort(new Error("用户已停止生成"))
+          const marker = thinkingJobs.cancel(stop[1]!)
+          if (marker) publish(stop[1]!, marker)
           if (kernel.reset) await kernel.reset(stop[1]!)
           else await kernel.interrupt?.(stop[1]!)
           return Response.json({ stopped: Boolean(controller) }, { headers })
@@ -633,58 +652,6 @@ async function executeProviderTool(
   }
 }
 
-type ThinkingSummaryDraft = { method: string; reason: string; caution: string }
-
-async function summarizeThinking(text: string, provider?: ChatProvider) {
-  const draft = fallbackThinkingSummary(text)
-  if (!provider) return { summary: draft, degraded: true }
-  const messages: ProviderMessage[] = [
-    { role: "system", content: summarizerGuidelines },
-    { role: "user", content: `思考片段：\n${text.trim().slice(-12000)}` },
-  ]
-  try {
-    let reply = ""
-    await provider.stream(
-      { context: isolatedContext(text), messages, reasoning: "none", maxTokens: 600 },
-      (chunk) => { reply += chunk },
-    )
-    const parsed = parseThinkingSummary(reply)
-    return { summary: parsed ?? draft, degraded: !parsed }
-  } catch {
-    return { summary: draft, degraded: true }
-  }
-}
-
-function isolatedContext(text: string): ProviderContext {
-  return { prompt: text, budget: 0, estimatedTokens: 0, compressed: false, retainedTurns: 0, treeVersion: 0 }
-}
-
-function parseThinkingSummary(reply: string): ThinkingSummaryDraft | undefined {
-  const cleaned = reply.replace(/```json/gi, "").replace(/```/g, "").trim()
-  const start = cleaned.indexOf("{")
-  const end = cleaned.lastIndexOf("}")
-  if (start < 0 || end <= start) return undefined
-  try {
-    const value = JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>
-    const method = clampSummaryText(value.method, 120)
-    const reason = clampSummaryText(value.reason, 300)
-    if (!method || !reason) return undefined
-    return { method, reason, caution: clampSummaryText(value.caution, 300) }
-  } catch {
-    return undefined
-  }
-}
-
-function clampSummaryText(value: unknown, maxLength: number) {
-  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, maxLength) : ""
-}
-
-function fallbackThinkingSummary(text: string): ThinkingSummaryDraft {
-  const normalized = text.replace(/\s+/g, " ").trim()
-  const sentence = normalized.split(/(?<=[。！？.!?])/)[0] ?? normalized
-  return { method: "思考阶段", reason: sentence.slice(0, 160) || "该阶段没有可用的思考摘要", caution: "" }
-}
-
 function parseToolArguments(call: ProviderToolCall): Record<string, unknown> {
   try {
     const value = JSON.parse(call.arguments)
@@ -838,7 +805,7 @@ function withoutPrompt(context: ProviderContext) {
 }
 
 function toProcessHistoryEvent(event: StreamEvent): ProcessHistoryEvent | undefined {
-  if (event.type === "chunk" || event.type === "reasoning.chunk" || event.type === "answer" || event.type === "tool.start" || event.type === "tool.result" || event.type === "tool.error") return event
+  if (event.type === "thinking.marker" || event.type === "chunk" || event.type === "reasoning.chunk" || event.type === "answer" || event.type === "tool.start" || event.type === "tool.result" || event.type === "tool.error") return event
   if (event.type === "verification") return { type: "tool.complete", tool: "verify" }
   if (event.type === "web.result") return { type: "tool.complete", tool: "web.search" }
   if (event.type !== "artifact") return undefined

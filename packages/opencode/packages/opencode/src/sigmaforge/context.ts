@@ -66,7 +66,7 @@ function countTurns(messages: SigmaForgeMessage[]) {
 }
 
 function thinkingOutline(store: ThinkingSummaryStore) {
-  const summaries = store.snapshot().summaries
+  const summaries = store.snapshot().summaries.filter((summary) => summary.status !== "pending")
   if (!summaries.length) return "（暂无）"
   return summaries.map((item) => `${item.order}. 方法：${item.method}；理由：${item.reason}${item.caution ? `；注意：${item.caution}` : ""}`).join("\n")
 }

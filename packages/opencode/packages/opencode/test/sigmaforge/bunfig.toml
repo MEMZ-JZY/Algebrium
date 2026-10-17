@@ -1,0 +1,4 @@
+preload = ["./test/sigmaforge/preload.ts"]
+
+[test]
+preload = ["./test/sigmaforge/preload.ts"]

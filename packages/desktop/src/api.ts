@@ -4,7 +4,8 @@ export type Session = { id: string; subject?: string; createdAt?: number; update
 export type SessionMessage = { role: "user" | "assistant"; content: string; createdAt: number }
 export type ProcessHistoryEvent =
   | { type: "chunk"; text: string }
-  | { type: "reasoning.chunk"; text: string }
+  | { type: "reasoning.chunk"; text: string; stageID?: string; runID?: string }
+  | { type: "thinking.marker"; stageID?: string; runID?: string; summaryID?: string }
   | { type: "answer"; text: string }
   | { type: "tool.start"; tool: string; input?: unknown }
   | { type: "tool.result"; tool: string; result: CASResult }
@@ -39,7 +40,7 @@ export type TheoryNode = {
   children: string[]
 }
 export type TheoryTree = { sessionID: string; rootID?: string; version: number; nodes: Record<string, TheoryNode> }
-export type ThinkingSummary = { id: string; order: number; method: string; reason: string; caution: string; createdAt: number; updatedAt: number }
+export type ThinkingSummary = { id: string; order: number; method: string; reason: string; caution: string; createdAt: number; updatedAt: number; runID?: string; stageID?: string; status?: "pending" | "ready" | "degraded" }
 export type ThinkingSummarySnapshot = { version: number; summaries: ThinkingSummary[] }
 export type ThinkingSummaryInput = { method?: string; reason?: string; caution?: string }
 export type ThinkingSummaryDraft = { method: string; reason: string; caution: string }
@@ -53,7 +54,7 @@ export type ProviderSettings = { active: string; profiles: Record<string, Provid
 export type ProviderSettingsInput = { id: string; provider: string; model: string; baseURL?: string; apiKey?: string }
 export type StreamEvent =
   | { type: "chunk"; text: string }
-  | { type: "reasoning.chunk"; text: string }
+  | { type: "reasoning.chunk"; text: string; stageID?: string; runID?: string }
   | { type: "answer"; text: string }
   | { type: "tool.start"; tool: string; input?: unknown }
   | { type: "tool.result"; tool: string; result: CASResult }
@@ -63,7 +64,7 @@ export type StreamEvent =
   | { type: "verification"; result: VerificationResult }
   | { type: "theory.updated"; node: TheoryNode; version: number }
   | { type: "thinking.updated"; version: number; summaries: ThinkingSummary[] }
-  | { type: "thinking.marker" }
+  | { type: "thinking.marker"; stageID?: string; runID?: string; summaryID?: string }
   | { type: "web.result"; result: WebSearchResult }
   | { type: "error"; message: string }
   | { type: "done"; context: ContextSnapshot }
@@ -78,6 +79,21 @@ export function getTheory(sessionID: string) {
 
 export function getThinking(sessionID: string) {
   return request<ThinkingSummarySnapshot>(`/sessions/${sessionID}/thinking`)
+}
+
+export function subscribeThinkingSummaries(sessionID: string, onUpdate: (snapshot: ThinkingSummarySnapshot) => void) {
+  const events = new EventSource(`${origin}/sessions/${sessionID}/thinking/events`)
+  events.onmessage = (messageEvent) => {
+    try {
+      const event = JSON.parse(messageEvent.data) as { type?: string; version?: number; summaries?: ThinkingSummary[] }
+      if (event.type === "thinking.updated" && typeof event.version === "number" && Array.isArray(event.summaries)) {
+        onUpdate({ version: event.version, summaries: event.summaries })
+      }
+    } catch {
+      // Ignore malformed messages and keep the independent subscription open.
+    }
+  }
+  return () => events.close()
 }
 
 export function createThinkingSummary(sessionID: string, input: ThinkingSummaryDraft) {

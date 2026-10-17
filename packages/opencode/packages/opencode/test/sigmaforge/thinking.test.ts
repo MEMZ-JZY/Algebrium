@@ -133,7 +133,7 @@ describe("thinking summary server API", () => {
     expect(requests[0]?.tools?.some((tool) => tool.function.name === "sigmaforge_thinking_summary")).toBe(false)
     const detail = await (await fetch(`${origin}/sessions/${session.id}`)).json() as { messages: Array<{ role: string; content: string }>; thinkingSummaries: unknown[] }
     expect(detail.messages.at(-1)?.content).toBe("回答完毕")
-    expect(detail.thinkingSummaries).toEqual([])
+    expect(detail.thinkingSummaries).toHaveLength(1)
   })
 
   test("does not auto-record summaries for computational tools", async () => {

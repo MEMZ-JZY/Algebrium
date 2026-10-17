@@ -6,6 +6,9 @@ export type ThinkingSummary = {
   caution: string
   createdAt: number
   updatedAt: number
+  runID?: string
+  stageID?: string
+  status?: "pending" | "ready" | "degraded"
 }
 
 export type ThinkingSummarySnapshot = {
@@ -118,15 +121,15 @@ export class ThinkingSummaryStore {
   private version: number
 
   constructor(snapshot?: ThinkingSummarySnapshot) {
-    this.summaries = snapshot?.summaries ? structuredClone(snapshot.summaries) : []
-    this.version = snapshot?.version ?? 0
+    this.summaries = snapshot?.summaries ? structuredClone(snapshot.summaries).map((summary) => summary.status === "pending" ? { ...summary, status: "degraded" as const } : summary) : []
+    this.version = (snapshot?.version ?? 0) + (snapshot?.summaries.some((summary) => summary.status === "pending") ? 1 : 0)
   }
 
   snapshot(): ThinkingSummarySnapshot {
     return structuredClone({ version: this.version, summaries: this.summaries })
   }
 
-  add(input: ThinkingSummaryInput & { id?: string }): ThinkingSummary {
+  add(input: ThinkingSummaryInput & { id?: string; runID?: string; stageID?: string; status?: ThinkingSummary["status"] }): ThinkingSummary {
     const now = Date.now()
     const summary: ThinkingSummary = {
       id: input.id ?? crypto.randomUUID(),
@@ -136,6 +139,7 @@ export class ThinkingSummaryStore {
       caution: optionalSummaryText(input.caution ?? "", "caution", 300),
       createdAt: now,
       updatedAt: now,
+      ...(input.runID ? { runID: input.runID, stageID: input.stageID, status: input.status } : {}),
     }
     this.summaries.push(summary)
     this.version++
@@ -152,10 +156,19 @@ export class ThinkingSummaryStore {
       reason: input.reason === undefined ? current.reason : requireSummaryText(input.reason, "reason", 300),
       caution: input.caution === undefined ? current.caution : optionalSummaryText(input.caution, "caution", 300),
       updatedAt: Date.now(),
+      ...(current.status ? { status: "ready" as const } : {}),
     }
     this.summaries[index] = next
     this.version++
     return structuredClone(next)
+  }
+
+  complete(id: string, input: ThinkingSummaryInput, degraded: boolean) {
+    const current = this.summaries.find((summary) => summary.id === id)
+    if (current?.status !== "pending") return false
+    this.update(id, input)
+    this.summaries.find((summary) => summary.id === id)!.status = degraded ? "degraded" : "ready"
+    return true
   }
 
   remove(id: string): { removed: ThinkingSummary; summaries: ThinkingSummary[] } {
