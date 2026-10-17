@@ -3,7 +3,7 @@ import katex from "katex"
 import { marked } from "marked"
 import type Plotly from "plotly.js-basic-dist-min"
 import { type CSSProperties, FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react"
-import { askSigmaForge, createSession, deleteSession, deleteThinkingSummary, getHealth, getProviderSettings, getSession, getTheory, getThinking, listSessions, rollbackThinkingSummary, stopSigmaForge, updateProviderSettings, updateThinkingSummary, uploadSessionFile, type CASResult, type ContextSnapshot, type PlotArtifact, type ProcessHistoryEvent, type ProcessHistoryRun, type ProviderSettings, type Session, type SessionMessage, type StreamEvent, type TheoryNode, type ThinkingSummary, type ThinkingSummaryInput, type VerificationResult, type WebSearchResult } from "./api"
+import { askSigmaForge, createSession, createThinkingSummary, deleteSession, deleteThinkingSummary, getHealth, getProviderSettings, getSession, getTheory, getThinking, listSessions, reasoningLevels, rollbackThinkingSummary, stopSigmaForge, summarizeThinking, updateProviderSettings, updateThinkingSummary, uploadSessionFile, type CASResult, type ContextSnapshot, type PlotArtifact, type ProcessHistoryEvent, type ProcessHistoryRun, type ProviderSettings, type ReasoningLevel, type Session, type SessionMessage, type StreamEvent, type TheoryNode, type ThinkingSummary, type ThinkingSummaryDraft, type ThinkingSummaryInput, type VerificationResult, type WebSearchResult } from "./api"
 import { citationURL } from "./web-sources"
 import "katex/dist/katex.min.css"
 
@@ -11,7 +11,7 @@ type ArtifactState = { id: string; title: string; status: "pending" | "ready" | 
 type ToolActivity = { id: string; tool: string; status: "running" | "complete" | "error"; startedAt: number; input?: unknown; result?: CASResult; error?: string }
 type ProcessStep =
   | { id: string; kind: "assistant"; lines: string[] }
-  | { id: string; kind: "reasoning"; content: string }
+  | { id: string; kind: "reasoning"; content: string; pending?: boolean }
   | { id: string; kind: "tools"; activities: ToolActivity[] }
 type ProcessRun = { id: string; userMessageCreatedAt: number; steps: ProcessStep[]; completed: boolean; finalAnswer?: string }
 type ColorScheme = "light" | "dark"
@@ -34,6 +34,16 @@ const uiText = {
   zh: { newChat: "新建对话", history: "历史会话", connected: "本地服务已连接", title: "可验证数学智能体", subtitle: "真实模型 · SageMath CAS · LaTeX", settings: "设置", emptyTitle: "有什么数学问题？", emptyBody: "支持符号计算、步骤验证、二维与三维交互绘图。", examples: "问题示例", placeholder: "向 Algebrium 提问，Shift + Enter 换行", uploading: "正在上传…", upload: "上传文本文件", composerHint: "支持 LaTeX、CAS 与绘图", stopping: "正在停止…", stop: "■ 停止", send: "发送问题", you: "你", context: "上下文", compressed: "已压缩", plots: "函数图像", artifacts: "个产物", expandPlots: "展开函数图像", collapsePlots: "折叠函数图像", noPlots: "暂无函数图像", noPlotsBody: "在对话中要求绘制函数、曲面或几何图。", deleteConfirm: "确定删除这个历史会话吗？此操作不可撤销。", appearance: "外观", theme: "主题", system: "跟随系统", light: "浅色", dark: "深色", language: "语言", provider: "Provider", providerDescription: "切换模型服务，配置会立即同步到本地后端。", model: "模型", baseURL: "基础 URL", apiKey: "API Key", apiKeyHint: "留空则继续使用当前进程中的密钥", save: "保存更改", saving: "正在保存…", saved: "已生效", close: "关闭设置", general: "通用", connection: "模型服务", loadError: "无法读取 Provider 配置", saveError: "Provider 配置保存失败", custom: "自定义 Provider" },
   en: { newChat: "New chat", history: "History", connected: "Local service connected", title: "Verifiable Math Agent", subtitle: "Real model · SageMath CAS · LaTeX", settings: "Settings", emptyTitle: "What would you like to solve?", emptyBody: "Symbolic computation, verified steps, and interactive 2D or 3D plots.", examples: "Examples", placeholder: "Ask Algebrium, Shift + Enter for a new line", uploading: "Uploading…", upload: "Upload text file", composerHint: "LaTeX, CAS, and plotting supported", stopping: "Stopping…", stop: "■ Stop", send: "Send question", you: "You", context: "Context", compressed: "compressed", plots: "Plots", artifacts: "artifacts", expandPlots: "Expand plots", collapsePlots: "Collapse plots", noPlots: "No plots yet", noPlotsBody: "Ask for a function, surface, or geometry plot in the conversation.", deleteConfirm: "Delete this conversation? This cannot be undone.", appearance: "Appearance", theme: "Theme", system: "System", light: "Light", dark: "Dark", language: "Language", provider: "Provider", providerDescription: "Switch model services. Changes are applied to the local backend immediately.", model: "Model", baseURL: "Base URL", apiKey: "API Key", apiKeyHint: "Leave blank to keep the key currently loaded by the process", save: "Save changes", saving: "Saving…", saved: "Applied", close: "Close settings", general: "General", connection: "Model service", loadError: "Unable to load Provider settings", saveError: "Unable to save Provider settings", custom: "Custom Provider" },
 } as const
+
+const reasoningLevelLabels: Record<ReasoningLevel, string> = {
+  none: "None",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "xHigh",
+  max: "Max",
+  ultra: "Ultra",
+}
 
 export function App() {
   const session = useRef<string | undefined>(undefined)
@@ -62,6 +72,10 @@ export function App() {
   const [connection, setConnection] = useState<ConnectionStatus>("checking")
   const [theme, setTheme] = useState<ThemePreference>(() => readPreference("algebrium-theme", "system"))
   const [language, setLanguage] = useState<Language>(() => readPreference("algebrium-language", "zh"))
+  const [reasoningLevel, setReasoningLevel] = useState<ReasoningLevel>(() => {
+    const stored = readPreference<ReasoningLevel>("algebrium-reasoning", "medium")
+    return reasoningLevels.includes(stored) ? stored : "medium"
+  })
   const colorScheme = useColorScheme(theme)
   const text = uiText[language]
   const messagesEnd = useRef<HTMLDivElement>(null)
@@ -69,6 +83,7 @@ export function App() {
   const stickToBottom = useRef(true)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const questionInput = useRef<HTMLTextAreaElement>(null)
+  const reasoningStage = useRef<{ id: string; text: string } | null>(null)
 
   useEffect(() => {
     let active = true
@@ -87,6 +102,7 @@ export function App() {
   useEffect(() => { void refreshSessions() }, [])
   useEffect(() => { localStorage.setItem("algebrium-theme", theme); document.documentElement.dataset.theme = theme === "system" ? "" : theme }, [theme])
   useEffect(() => { localStorage.setItem("algebrium-language", language); document.documentElement.lang = language === "zh" ? "zh-CN" : "en" }, [language])
+  useEffect(() => { localStorage.setItem("algebrium-reasoning", reasoningLevel) }, [reasoningLevel])
   useEffect(() => { if (!loading) setStopping(false) }, [loading])
   useEffect(() => { if (stickToBottom.current) messagesEnd.current?.scrollIntoView({ behavior: loading ? "auto" : "smooth" }) }, [history, answer, loading, processRuns])
 
@@ -122,6 +138,7 @@ export function App() {
   }
 
   function resetTransientState() {
+    reasoningStage.current = null
     setAnswer("")
     setProcessRuns([])
     setVerifications([])
@@ -162,6 +179,7 @@ export function App() {
     setError("")
     setLoading(true)
     setQuestion("")
+    reasoningStage.current = null
     try {
       session.current ??= (await createSession()).id
       const createdAt = Date.now()
@@ -172,7 +190,7 @@ export function App() {
       setProcessRuns((current) => [...current, { id: processID, userMessageCreatedAt: createdAt, steps: [], completed: false }])
       stickToBottom.current = true
       setShowScrollToBottom(false)
-      await askSigmaForge(session.current, message, applyEvent)
+      await askSigmaForge(session.current, message, applyEvent, reasoningLevel)
       setTheory((await getTheory(session.current)).nodes)
       setThinkingSummaries((await getThinking(session.current)).summaries)
       const detail = await getSession(session.current)
@@ -235,12 +253,42 @@ export function App() {
     setThinkingSummaries(result.summaries)
   }
 
+  // The backend streams a marker whenever the model closes a thinking stage.
+  // The staged reasoning is trimmed here and summarized by a separate model
+  // session, so the main conversation keeps streaming without waiting.
+  function closeReasoningStage() {
+    const stage = reasoningStage.current
+    reasoningStage.current = null
+    if (!stage || !stage.text.trim()) return
+    setProcessRuns((current) => updateRunReasoningStage(current, stage.id, { content: "", pending: true }))
+    void summarizeReasoningStage(stage.id, stage.text)
+  }
+
+  async function summarizeReasoningStage(stageID: string, text: string) {
+    const sessionID = session.current
+    try {
+      const { summary } = await summarizeThinking(text)
+      const label = [summary.method, summary.reason].filter(Boolean).join(" · ")
+      const caution = summary.caution ? `（注意：${summary.caution}）` : ""
+      setProcessRuns((current) => updateRunReasoningStage(current, stageID, { content: `${label}${caution}`, pending: false }))
+      if (sessionID) await createThinkingSummary(sessionID, summary)
+    } catch {
+      setProcessRuns((current) => updateRunReasoningStage(current, stageID, { content: "这段思考的摘要生成失败。", pending: false }))
+    }
+  }
+
   function applyEvent(event: StreamEvent) {
     if (event.type === "chunk") {
       setAnswer((current) => current + event.text)
       setProcessRuns((current) => updateActiveProcessRun(current, (steps) => appendProcessText(steps, "assistant", event.text)))
     }
-    if (event.type === "reasoning.chunk") setProcessRuns((current) => updateActiveProcessRun(current, (steps) => appendProcessText(steps, "reasoning", event.text)))
+    if (event.type === "reasoning.chunk") {
+      reasoningStage.current ??= { id: crypto.randomUUID(), text: "" }
+      const stage = reasoningStage.current
+      stage.text += event.text
+      setProcessRuns((current) => updateActiveProcessRun(current, (steps) => appendReasoningChunk(steps, stage.id, event.text)))
+    }
+    if (event.type === "thinking.marker") closeReasoningStage()
     if (event.type === "answer") setProcessRuns((current) => updateActiveProcessAnswer(current, event.text))
     if (event.type === "tool.start") {
       const activity: ToolActivity = { id: crypto.randomUUID(), tool: event.tool, status: "running", startedAt: Date.now(), input: event.input }
@@ -273,11 +321,13 @@ export function App() {
     }
     if (event.type === "thinking.updated") setThinkingSummaries(event.summaries)
     if (event.type === "error") {
+      closeReasoningStage()
       setError(event.message)
       setProcessRuns((current) => updateActiveProcessRun(current, (steps) => steps.map((step) => step.kind === "tools" ? { ...step, activities: step.activities.map((item) => item.status === "running" ? { ...item, status: "complete" } : item) } : step)))
       setArtifacts((current) => current.map((item) => item.status === "pending" ? { ...item, status: "error", error: event.message } : item))
     }
     if (event.type === "done") {
+      closeReasoningStage()
       setContext(event.context)
       setProcessRuns((current) => completeActiveProcessRun(current))
     }
@@ -329,6 +379,12 @@ export function App() {
         <textarea ref={questionInput} id="question" rows={2} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} disabled={loading} placeholder={text.placeholder} />
         <div className="composer-actions">
           <label className="upload-button" title={text.upload}>＋<input type="file" accept=".txt,.md,.csv,.json" disabled={loading || uploading || connection !== "connected"} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = "" }} /></label>
+          <label className="reasoning-picker" title={language === "zh" ? "推理等级：None 关闭思考，等级越高思考越充分" : "Reasoning level: None disables thinking, higher levels think longer"}>
+            <span className="reasoning-picker-label">{language === "zh" ? "推理" : "Reasoning"}</span>
+            <select value={reasoningLevel} onChange={(event) => setReasoningLevel(event.target.value as ReasoningLevel)} disabled={loading} aria-label={language === "zh" ? "推理等级" : "Reasoning level"}>
+              {reasoningLevels.map((level) => <option key={level} value={level}>{reasoningLevelLabels[level]}</option>)}
+            </select>
+          </label>
           <span>{uploading ? text.uploading : text.composerHint}</span>
           {loading ? <button className="stop-button" type="button" disabled={stopping} onClick={() => void stop()}>{stopping ? text.stopping : text.stop}</button> : <button className="send-button" disabled={!question.trim() || connection !== "connected"} aria-label={text.send}>↑</button>}
         </div>
@@ -516,6 +572,25 @@ function appendProcessText(current: ProcessStep[], kind: "assistant" | "reasonin
   return [...current, { id: crypto.randomUUID(), kind, content: text }]
 }
 
+function appendReasoningChunk(current: ProcessStep[], stageID: string, text: string): ProcessStep[] {
+  const index = current.findIndex((step) => step.kind === "reasoning" && step.id === stageID)
+  if (index < 0) return [...current, { id: stageID, kind: "reasoning", content: text }]
+  const step = current[index]
+  if (!step || step.kind !== "reasoning") return current
+  return current.map((item, itemIndex) => itemIndex === index ? { ...step, content: step.content + text } : item)
+}
+
+function updateReasoningStage(steps: ProcessStep[], stageID: string, update: { content: string; pending: boolean }): ProcessStep[] {
+  return steps.map((step) => step.kind === "reasoning" && step.id === stageID ? { ...step, ...update } : step)
+}
+
+function updateRunReasoningStage(runs: ProcessRun[], stageID: string, update: { content: string; pending: boolean }): ProcessRun[] {
+  return runs.map((run) => {
+    if (!run.steps.some((step) => step.kind === "reasoning" && step.id === stageID)) return run
+    return { ...run, steps: updateReasoningStage(run.steps, stageID, update) }
+  })
+}
+
 function appendProcessTool(current: ProcessStep[], activity: ToolActivity): ProcessStep[] {
   const last = current.at(-1)
   if (last?.kind === "tools") return [...current.slice(0, -1), { ...last, activities: [...last.activities, activity] }]
@@ -555,7 +630,7 @@ function ProcessFlow({ steps, language, loading }: { steps: ProcessStep[]; langu
     <div className="message process-flow"><span>Algebrium</span>
       {steps.map((step) => {
         if (step.kind === "assistant") return null
-        if (step.kind === "reasoning") return <ReasoningBlock key={step.id} content={step.content} language={language} active={loading && step === steps.at(-1)} />
+        if (step.kind === "reasoning") return <ReasoningBlock key={step.id} content={step.content} language={language} active={loading && step === steps.at(-1)} pending={step.pending} />
         return <ToolActivityGroup key={step.id} activities={step.activities} language={language} />
       })}
     </div>
@@ -599,12 +674,17 @@ function renderableAssistantLines(lines: string[], complete: boolean) {
   return result
 }
 
-function ReasoningBlock({ content, language, active }: { content: string; language: Language; active: boolean }) {
-  const [open, setOpen] = useState(active)
-  useEffect(() => { setOpen(active) }, [active])
-  return <details className={`reasoning-block ${active ? "active" : "complete"}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary><span className="reasoning-dot" />{language === "zh" ? (active ? "正在思考" : "模型思考") : (active ? "Thinking" : "Model reasoning")}<span className="tool-group-chevron" aria-hidden="true" /></summary>
-    <div className="reasoning-content"><RenderBuffer content={content} /></div>
+function ReasoningBlock({ content, language, active, pending }: { content: string; language: Language; active: boolean; pending?: boolean }) {
+  const [open, setOpen] = useState(active || Boolean(pending))
+  useEffect(() => { setOpen(active || Boolean(pending)) }, [active, pending])
+  const label = pending
+    ? (language === "zh" ? "正在生成摘要" : "Summarizing")
+    : language === "zh" ? (active ? "正在思考" : "思考摘要") : (active ? "Thinking" : "Thinking summary")
+  return <details className={`reasoning-block ${pending ? "summarizing" : active ? "active" : "complete"}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><span className="reasoning-dot" />{label}<span className="tool-group-chevron" aria-hidden="true" /></summary>
+    <div className="reasoning-content">{pending
+      ? <p className="reasoning-pending">{language === "zh" ? "模型正在另一个会话里把这段思考压缩成摘要…" : "The model is compressing this stage into a summary in a separate session…"}</p>
+      : <RenderBuffer content={content} />}</div>
   </details>
 }
 
