@@ -11,7 +11,7 @@ import type { ThinkingSummary } from "./thinking"
 
 export type StreamEvent =
   | { type: "chunk"; text: string }
-  | { type: "reasoning.chunk"; text: string }
+  | { type: "reasoning.chunk"; text: string; stageID?: string; runID?: string }
   | { type: "answer"; text: string }
   | { type: "tool.start"; tool: string; input?: unknown }
   | { type: "tool.result"; tool: string; result: CASResult }
@@ -21,6 +21,7 @@ export type StreamEvent =
   | { type: "verification"; result: VerificationResult }
   | { type: "theory.updated"; node: TheoryNode; version: number }
   | { type: "thinking.updated"; version: number; summaries: ThinkingSummary[] }
+  | { type: "thinking.marker"; stageID?: string; runID?: string; summaryID?: string }
   | { type: "kb.result"; entries: KBSearchResult[] }
   | { type: "mistake.attributed"; attribution: MistakeAttribution }
   | { type: "learning.path"; nodes: LearningPathNode[] }

@@ -13,7 +13,8 @@ export type SigmaForgeMessage = { role: "user" | "assistant"; content: string; c
 
 export type ProcessHistoryEvent =
   | { type: "chunk"; text: string }
-  | { type: "reasoning.chunk"; text: string }
+  | { type: "reasoning.chunk"; text: string; stageID?: string; runID?: string }
+  | { type: "thinking.marker"; stageID?: string; runID?: string; summaryID?: string }
   | { type: "answer"; text: string }
   | { type: "tool.start"; tool: string; input?: unknown }
   | { type: "tool.result"; tool: string; result: CASResult }
@@ -140,7 +141,7 @@ export class SigmaForgeSessions {
     this.persist()
   }
 
-  addThinking(id: string, input: { method: string; reason: string; caution?: string }) {
+  addThinking(id: string, input: Parameters<ThinkingSummaryStore["add"]>[0]) {
     const summary = this.get(id).thinking.add(input)
     this.persist()
     return summary
@@ -266,6 +267,7 @@ function isProcessHistoryRun(value: unknown): value is ProcessHistoryRun {
 function isProcessHistoryEvent(value: unknown): value is ProcessHistoryEvent {
   if (!value || typeof value !== "object") return false
   const event = value as Record<string, unknown>
+  if (event.type === "thinking.marker") return [event.stageID, event.runID, event.summaryID].every((field) => field === undefined || typeof field === "string")
   if (event.type === "chunk" || event.type === "reasoning.chunk" || event.type === "answer") return typeof event.text === "string"
   if (event.type === "tool.start") return typeof event.tool === "string"
   if (event.type === "tool.complete") return typeof event.tool === "string"

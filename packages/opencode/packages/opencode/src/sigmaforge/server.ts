@@ -12,8 +12,10 @@ import { fingerprintProblem } from "./fingerprint"
 import { attributeMistake } from "./attribution"
 import { buildLearningPath } from "./learning-path"
 import type { KnowledgeBaseReader, MistakeSink } from "./kb"
-import type { ChatProvider, ProviderMessage, ProviderToolCall } from "./provider"
+import { reasoningLevels, type ChatProvider, type ProviderMessage, type ProviderToolCall, type ReasoningLevel } from "./provider"
 import { mathProviderTools } from "./provider-tools"
+import { stripStageMarkers, ThinkingMarkerReader } from "./thinking"
+import { ThinkingJobs, summarizeThinking } from "./thinking-jobs"
 import { WebSearchRequestSchema, type WebSearchClient } from "./web-search"
 
 const providerGuidelines = Bun.file(new URL("./provider-guidelines.md", import.meta.url)).text()
@@ -27,6 +29,21 @@ const thinkingSummarySchema = z.object({
 const thinkingRollbackSchema = z.object({
   targetSummaryID: z.string().optional(),
   reason: z.string().min(1).max(300),
+})
+
+// Repeated next to the user turn because the long tool table in the guidelines
+// dilutes the rule; models follow an instruction that sits next to the task much
+// more reliably than one buried in the system prompt.
+const stageReminder = "[阶段标记] 每次调用工具之前，先在回答正文中单独输出一行 [[STAGE]]；最终回答里不要出现它。"
+
+const sessionMessageSchema = z.object({
+  message: z.string(),
+  reasoning: z.enum(reasoningLevels).optional(),
+})
+
+const thinkingSummarizeSchema = z.object({
+  text: z.string().min(1).max(40000),
+  sessionID: z.string().optional(),
 })
 
 export type SigmaForgeServerOptions = {
@@ -67,7 +84,22 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
       }
     }
   }
+  const thinkingJobs = new ThinkingJobs(sessions, (sessionID) => {
+    const snapshot = sessions.get(sessionID).thinking.snapshot()
+    broadcast(sessionID, { type: "thinking.updated", ...snapshot })
+  })
   const publish = (sessionID: string, event: StreamEvent) => {
+    if (event.type === "reasoning.chunk") event = thinkingJobs.reasoning(sessionID, event.text)
+    if (event.type === "thinking.marker") {
+      const marker = thinkingJobs.close(sessionID) ?? (event.summaryID ? event : undefined)
+      if (!marker) return
+      event = marker
+    }
+    if (event.type === "done") {
+      const marker = thinkingJobs.close(sessionID)
+      if (marker) publish(sessionID, marker)
+      thinkingJobs.end(sessionID)
+    }
     if (event.type === "done") {
       const finalMessage = sessions.get(sessionID).messages.at(-1)
       if (finalMessage?.role === "assistant") {
@@ -111,6 +143,16 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
         }
       }
 
+      if (request.method === "POST" && url.pathname === "/thinking/summarize") {
+        try {
+          const input = thinkingSummarizeSchema.parse(await request.json())
+          const summary = await summarizeThinking(input.text, mockProvider ? undefined : activeProvider)
+          return Response.json({ ok: true, ...summary }, { headers })
+        } catch (error) {
+          return jsonError(error, statusFor(error), headers)
+        }
+      }
+
       if (request.method === "POST" && url.pathname === "/sessions") {
         try {
           const input = (await request.json().catch(() => ({}))) as { subject?: string }
@@ -145,6 +187,8 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const sessionID = sessionDetail[1]!
           await kernel.reset?.(sessionID)
           sessions.delete(sessionID)
+          thinkingJobs.cancel(sessionID)
+          thinkingJobs.end(sessionID)
           return Response.json({ deleted: true }, { headers })
         } catch (error) {
           return jsonError(error, statusFor(error), headers)
@@ -169,9 +213,10 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
         }
       }
 
-      const events = url.pathname.match(/^\/sessions\/([^/]+)\/events$/)
+      const events = url.pathname.match(/^\/sessions\/([^/]+)\/(thinking\/)?events$/)
       if (request.method === "GET" && events) {
         const sessionID = events[1]!
+        const thinkingOnly = Boolean(events[2])
         try {
           sessions.get(sessionID)
         } catch (error) {
@@ -197,8 +242,9 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
             listener = (event: StreamEvent) => {
               if (closed) return
               try {
+                if (thinkingOnly && event.type !== "thinking.updated") return
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
-                if (event.type !== "done") return
+                if (thinkingOnly || event.type !== "done") return
                 cleanup()
                 controller.close()
               } catch {
@@ -208,6 +254,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
             const current = listeners.get(sessionID) ?? new Set()
             current.add(listener)
             listeners.set(sessionID, current)
+            if (thinkingOnly) listener({ type: "thinking.updated", ...sessions.get(sessionID).thinking.snapshot() })
           },
           cancel() { cleanup() },
         })
@@ -251,6 +298,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const input = (await request.json()) as { targetSummaryID?: string; reason?: string }
           const parsed = thinkingRollbackSchema.parse({ ...input, reason: input.reason ?? "Manual rollback" })
           const result = sessions.rollbackThinking(sessionID, parsed.targetSummaryID)
+          thinkingJobs.invalidate(sessionID)
           const snapshot = sessions.get(sessionID).thinking.snapshot()
           broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
           return Response.json({ ok: true, removed: result.removed.map((item) => item.id), summaries: snapshot.summaries, version: snapshot.version }, { headers })
@@ -266,6 +314,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const summaryID = thinkingItem[2]!
           const input = (await request.json()) as { method?: string; reason?: string; caution?: string }
           const summary = sessions.updateThinking(sessionID, summaryID, input)
+          thinkingJobs.invalidate(sessionID)
           const snapshot = sessions.get(sessionID).thinking.snapshot()
           broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
           return Response.json({ ok: true, summary, summaries: snapshot.summaries, version: snapshot.version }, { headers })
@@ -278,6 +327,7 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           const sessionID = thinkingItem[1]!
           const summaryID = thinkingItem[2]!
           const result = sessions.removeThinking(sessionID, summaryID)
+          thinkingJobs.invalidate(sessionID)
           const snapshot = sessions.get(sessionID).thinking.snapshot()
           broadcast(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
           return Response.json({ ok: true, removed: result.removed.id, summaries: snapshot.summaries, version: snapshot.version }, { headers })
@@ -343,19 +393,20 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
       if (request.method === "POST" && messages) {
         const sessionID = messages[1]!
         try {
-          const input = (await request.json()) as { message?: string }
-          if (!input.message?.trim()) return jsonError(new Error("Message is required"), 400, headers)
+          const input = sessionMessageSchema.parse(await request.json())
+          if (!input.message.trim()) return jsonError(new Error("Message is required"), 400, headers)
           if (!mockProvider && !activeProvider) return jsonError(new Error("A real provider is not configured"), 503, headers)
           sessions.begin(sessionID)
           const controller = new AbortController()
           requests.set(sessionID, controller)
           const userMessage = sessions.append(sessionID, "user", input.message)
-          sessions.startProcess(sessionID, userMessage.createdAt)
+          const run = sessions.startProcess(sessionID, userMessage.createdAt)
+          thinkingJobs.begin(sessionID, run.id, mockProvider ? undefined : activeProvider)
           const providerContext = sessions.context(sessionID)
           options.onContext?.(providerContext)
           const reply = mockProvider
             ? emitMockReply(sessionID, input.message, sessions, cas, kernel, publish, options.knowledgeBase, options.mistakeSink)
-            : emitProviderReply(sessionID, sessions, activeProvider!, providerContext, cas, kernel, publish, controller.signal, options.knowledgeBase, options.webSearch)
+            : emitProviderReply(sessionID, sessions, activeProvider!, providerContext, cas, kernel, publish, controller.signal, options.knowledgeBase, options.webSearch, input.reasoning)
           void reply.catch((error) => {
             sessions.end(sessionID)
             publish(sessionID, { type: "error", message: error instanceof Error ? error.message : String(error) })
@@ -373,6 +424,8 @@ export function startSigmaForgeServer(options: SigmaForgeServerOptions = {}) {
           sessions.get(stop[1]!)
           const controller = requests.get(stop[1]!)
           if (controller) controller.abort(new Error("用户已停止生成"))
+          const marker = thinkingJobs.cancel(stop[1]!)
+          if (marker) publish(stop[1]!, marker)
           if (kernel.reset) await kernel.reset(stop[1]!)
           else await kernel.interrupt?.(stop[1]!)
           return Response.json({ stopped: Boolean(controller) }, { headers })
@@ -397,6 +450,7 @@ async function emitProviderReply(
   signal: AbortSignal,
   knowledgeBase?: KnowledgeBaseReader,
   webSearch?: WebSearchClient,
+  reasoning?: ReasoningLevel,
 ) {
   const theory = sessions.get(sessionID).theory
   const providerTools = sessions.get(sessionID).subject === "math" ? mathProviderTools.filter((tool) => webSearch || tool.function.name !== "sigmaforge_web_search") : []
@@ -404,7 +458,7 @@ async function emitProviderReply(
   publish(sessionID, { type: "theory.updated", node: problem, version: theory.snapshot().version })
   const messages: ProviderMessage[] = [
     { role: "system", content: await providerGuidelines },
-    { role: "user", content: context.prompt },
+    { role: "user", content: `${context.prompt}\n\n${stageReminder}` },
   ]
   let answer = ""
   const toolResults = new Map<string, unknown>()
@@ -433,17 +487,44 @@ async function emitProviderReply(
       if (type === "chunk") outputLineBuffer = ""
       else reasoningLineBuffer = ""
     }
+    const stageMarkers = new ThinkingMarkerReader()
+    let publishedMarkers = 0
+    const publishThinkingMarkers = (count: number) => {
+      for (let index = 0; index < count; index++) {
+        flushLineBuffer("reasoning.chunk")
+        flushLineBuffer("chunk")
+        publish(sessionID, { type: "thinking.marker" })
+        publishedMarkers++
+      }
+    }
     const turn = await provider.stream(
-      { context, messages, tools: forceFinal ? [] : providerTools, signal },
+      { context, messages, tools: forceFinal ? [] : providerTools, signal, reasoning },
       (text) => {
         flushLineBuffer("reasoning.chunk")
-        answer += text
-        publishCompleteLines("chunk", text)
+        const stage = stageMarkers.push(text)
+        if (stage.text) {
+          answer += stage.text
+          publishCompleteLines("chunk", stage.text)
+        }
+        publishThinkingMarkers(stage.markers)
       },
       (text) => publishCompleteLines("reasoning.chunk", text),
     )
+    const stageTail = stageMarkers.flush()
+    if (stageTail.text) {
+      answer += stageTail.text
+      publishCompleteLines("chunk", stageTail.text)
+    }
+    publishThinkingMarkers(stageTail.markers)
     flushLineBuffer("reasoning.chunk")
     flushLineBuffer("chunk")
+    // The model sometimes answers straight into a tool call without emitting the
+    // marker. A tool call still ends the thinking stage, so close it here to keep
+    // stage summaries deterministic instead of silently dropping them.
+    if (turn.toolCalls.length && publishedMarkers === 0) {
+      publish(sessionID, { type: "thinking.marker" })
+      publishedMarkers++
+    }
     if (forceFinal && turn.toolCalls.length) throw new Error("Provider requested another tool after repeated calls made no progress")
     if (!turn.toolCalls.length) {
       if (!answer.trim()) throw new Error(`${provider.id} returned an empty answer`)
@@ -456,19 +537,17 @@ async function emitProviderReply(
     }
     messages.push({
       role: "assistant",
-      content: turn.content || null,
+      content: stripStageMarkers(turn.content) || null,
       tool_calls: turn.toolCalls.map((call) => ({ id: requireToolCallID(call), type: "function", function: { name: call.name, arguments: call.arguments } })),
     })
     let executed = 0
-    let coveredBySummary = false
     for (const call of turn.toolCalls) {
       signal.throwIfAborted()
       const signature = `${call.name}:${canonicalToolArguments(call.arguments)}`
       let result = toolResults.get(signature)
       if (!toolResults.has(signature)) {
-        const autoSummary = call.name !== "sigmaforge_thinking_summary" && !coveredBySummary
         try {
-          result = await executeProviderTool(sessionID, call, sessions, cas, kernel, publish, problem.id, knowledgeBase, webSearch, autoSummary)
+          result = await executeProviderTool(sessionID, call, sessions, cas, kernel, publish, problem.id, knowledgeBase, webSearch)
           toolResults.set(signature, result)
           executed++
         } catch (error) {
@@ -478,8 +557,6 @@ async function emitProviderReply(
           result = { ok: false, error: message, instruction: "Correct the arguments once or explain the limitation. Do not repeat the same failed call." }
         }
       }
-      if (call.name === "sigmaforge_thinking_summary") coveredBySummary = true
-      else coveredBySummary = false
       messages.push({ role: "tool", tool_call_id: requireToolCallID(call), content: JSON.stringify(result) })
     }
     noProgressRounds = executed === 0 ? noProgressRounds + 1 : 0
@@ -500,14 +577,10 @@ async function executeProviderTool(
   parentID: string,
   knowledgeBase?: KnowledgeBaseReader,
   webSearch?: WebSearchClient,
-  autoSummary = false,
 ) {
   let node: TheoryNode | undefined
   try {
     const input = parseToolArguments(call)
-    if (call.name === "sigmaforge_thinking_summary") return executeThinkingSummary(sessionID, sessions, publish, input)
-    if (call.name === "sigmaforge_thinking_rollback") return executeThinkingRollback(sessionID, sessions, publish, input)
-    if (autoSummary) autoRecordThinkingSummary(sessionID, call.name, input, sessions, publish)
     const theory = sessions.get(sessionID).theory
     node = theory.add({ parentID, kind: "step", title: call.name, content: call.arguments })
     publish(sessionID, { type: "theory.updated", node, version: theory.snapshot().version })
@@ -576,112 +649,6 @@ async function executeProviderTool(
       }
     }
     throw error
-  }
-}
-
-function executeThinkingSummary(
-  sessionID: string,
-  sessions: SigmaForgeSessions,
-  publish: (sessionID: string, event: StreamEvent) => void,
-  input: unknown,
-) {
-  const request = thinkingSummarySchema.parse(input)
-  publish(sessionID, { type: "tool.start", tool: "thinking.summary", input: request })
-  const summary = sessions.addThinking(sessionID, request)
-  const snapshot = sessions.get(sessionID).thinking.snapshot()
-  publish(sessionID, { type: "tool.result", tool: "thinking.summary", result: { tool: "thinking.summary", text: `${summary.method}：${summary.reason}`, normalized: `${summary.method}：${summary.reason}`, durationMs: 0 } })
-  publish(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
-  return {
-    ok: true,
-    id: summary.id,
-    order: summary.order,
-    instruction: "摘要已记录；继续按该思路调用计算或验证工具。",
-  }
-}
-
-function executeThinkingRollback(
-  sessionID: string,
-  sessions: SigmaForgeSessions,
-  publish: (sessionID: string, event: StreamEvent) => void,
-  input: unknown,
-) {
-  const request = thinkingRollbackSchema.parse(input)
-  publish(sessionID, { type: "tool.start", tool: "thinking.rollback", input: request })
-  const result = sessions.rollbackThinking(sessionID, request.targetSummaryID)
-  const snapshot = sessions.get(sessionID).thinking.snapshot()
-  publish(sessionID, { type: "tool.result", tool: "thinking.rollback", result: { tool: "thinking.rollback", text: `已回滚 ${result.removed.length} 条摘要`, normalized: `已回滚 ${result.removed.length} 条摘要`, durationMs: 0 } })
-  publish(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
-  return {
-    ok: true,
-    removed: result.removed.map((item) => item.id),
-    remaining: result.summaries.length,
-    instruction: "已回滚错误摘要，请重新选择方法并记录新的思考摘要。",
-  }
-}
-
-function autoRecordThinkingSummary(
-  sessionID: string,
-  tool: string,
-  input: Record<string, unknown>,
-  sessions: SigmaForgeSessions,
-  publish: (sessionID: string, event: StreamEvent) => void,
-) {
-  const summary = thinkingSummaryForTool(tool, input)
-  if (!summary) return
-  const record = sessions.addThinking(sessionID, summary)
-  const snapshot = sessions.get(sessionID).thinking.snapshot()
-  publish(sessionID, { type: "thinking.updated", version: snapshot.version, summaries: snapshot.summaries })
-}
-
-function thinkingSummaryForTool(tool: string, input: Record<string, unknown>) {
-  const expression = String(input.expression ?? input.equation ?? "")
-  const variable = String(input.variable ?? input.xVariable ?? "x")
-  const normalized = tool === "sigmaforge_plot_function2d"
-    ? "plot.function2d"
-    : tool === "sigmaforge_plot_surface3d"
-      ? "plot.surface3d"
-      : tool === "sigmaforge_geometry"
-        ? "geometry"
-        : tool.replace(/^sigmaforge_/, "")
-  switch (normalized) {
-    case "solve":
-      return { method: "求解方程", reason: expression ? `使用 solve 解 ${expression}，变量 ${variable}` : "使用 solve 求解当前方程", caution: "检查所有解是否满足原方程和定义域" }
-    case "integrate":
-      return { method: "计算积分", reason: expression ? `使用 integrate 对 ${expression} 关于 ${variable} 积分` : "使用 integrate 计算积分", caution: "不定积分记得加常数 C；定积分检查收敛性" }
-    case "diff":
-      return { method: "计算导数", reason: expression ? `使用 diff 计算 ${expression} 关于 ${variable} 的 ${input.order ?? 1} 阶导数` : "使用 diff 计算导数", caution: "复合函数检查链式法则，注意符号和括号" }
-    case "limit":
-      return { method: "计算极限", reason: expression ? `使用 limit 计算 ${expression} 在 ${input.point ?? "指定点"} 的极限` : "使用 limit 计算极限", caution: "区分左右极限和未定式，不能直接代入时换元或化简" }
-    case "simplify":
-      return { method: "化简表达式", reason: expression ? `使用 simplify 化简 ${expression}` : "使用 simplify 化简表达式", caution: "保持等价性，不能改变定义域" }
-    case "series":
-      return { method: "展开级数", reason: expression ? `使用 series 将 ${expression} 在 ${input.point ?? "指定点"} 展开` : "使用 series 展开级数", caution: "确认展开点和收敛范围" }
-    case "matrix":
-      return { method: "执行矩阵运算", reason: `使用 matrix 执行 ${input.operation ?? "矩阵运算"}`, caution: "确认矩阵尺寸和奇异矩阵情况" }
-    case "factor":
-      return { method: "因式分解", reason: expression ? `使用 factor 分解 ${expression}` : "使用 factor 因式分解", caution: "保留系数和符号的一致性" }
-    case "assume":
-      return { method: "设置数学假设", reason: expression ? `为当前会话设置假设 ${expression}` : "设置数学假设", caution: "假设必须只针对单一符号比较" }
-    case "eval":
-      return { method: "计算数学表达式", reason: expression ? `使用 eval 计算 ${expression}` : "使用 eval 计算表达式", caution: "只计算受限数学表达式，不执行 Python 语句" }
-    case "numeric":
-      return { method: "数值近似", reason: expression ? `使用 numeric 计算 ${expression} 的数值结果` : "使用 numeric 计算数值结果", caution: "明确保留位数，区分精确值与近似值" }
-    case "statistics":
-      return { method: "计算统计量", reason: `使用 statistics 执行 ${input.operation ?? "统计计算"}`, caution: "确认样本与总体定义，必要时报告样本量" }
-    case "distribution":
-      return { method: "计算概率分布", reason: `使用 distribution 计算 ${input.distribution ?? "分布"} 的 ${input.operation ?? "概率"}`, caution: "参数顺序必须与工具定义一致" }
-    case "hypothesis":
-      return { method: "执行假设检验", reason: `使用 hypothesis 执行 ${input.test ?? "假设检验"}`, caution: "报告检验名、备择假设、统计量和 p 值" }
-    case "verify":
-      return { method: "符号验证", reason: expression ? `使用 verify 验证 ${expression} 的符号等价性` : "使用 verify 验证符号等价性", caution: "只证明两式之差为 0，不自动覆盖定义域" }
-    case "plot.function2d":
-      return { method: "绘制二维函数图", reason: expression ? `使用 plot.function2d 绘制 ${expression}` : "使用 plot.function2d 绘图", caution: "选择合理显示范围，隐函数/极坐标使用对应坐标系统" }
-    case "plot.surface3d":
-      return { method: "绘制三维曲面", reason: expression ? `使用 plot.surface3d 绘制 ${expression}` : "使用 plot.surface3d 绘图", caution: "使用合理范围并保留坐标轴" }
-    case "geometry":
-      return { method: "构造平面几何图", reason: "使用 geometry 构造点、线段和圆", caution: "线段必须引用已定义的点，圆使用圆心和半径" }
-    default:
-      return undefined
   }
 }
 
@@ -838,7 +805,7 @@ function withoutPrompt(context: ProviderContext) {
 }
 
 function toProcessHistoryEvent(event: StreamEvent): ProcessHistoryEvent | undefined {
-  if (event.type === "chunk" || event.type === "reasoning.chunk" || event.type === "answer" || event.type === "tool.start" || event.type === "tool.result" || event.type === "tool.error") return event
+  if (event.type === "thinking.marker" || event.type === "chunk" || event.type === "reasoning.chunk" || event.type === "answer" || event.type === "tool.start" || event.type === "tool.result" || event.type === "tool.error") return event
   if (event.type === "verification") return { type: "tool.complete", tool: "verify" }
   if (event.type === "web.result") return { type: "tool.complete", tool: "web.search" }
   if (event.type !== "artifact") return undefined

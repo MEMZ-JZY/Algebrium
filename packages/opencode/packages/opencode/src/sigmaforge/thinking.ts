@@ -6,6 +6,9 @@ export type ThinkingSummary = {
   caution: string
   createdAt: number
   updatedAt: number
+  runID?: string
+  stageID?: string
+  status?: "pending" | "ready" | "degraded"
 }
 
 export type ThinkingSummarySnapshot = {
@@ -19,20 +22,114 @@ export type ThinkingSummaryInput = {
   caution?: string
 }
 
+/**
+ * Marker the model emits in its **content** stream when one thinking stage is
+ * over (typically right before a tool call). The server strips it from the
+ * visible answer and emits `thinking.marker`; the client then trims the raw
+ * reasoning of that stage and asks a separate model session for a short
+ * summary, so the main conversation never pays for summarizing.
+ *
+ * The content channel is used instead of the reasoning channel because models
+ * reliably follow output-format rules there, while `reasoning_content` tends to
+ * only *discuss* an instruction instead of emitting the token.
+ */
+export const stageMarker = "[[STAGE]]"
+
+const markerCandidates = [stageMarker, "<<<STAGE>>>"]
+const markerPattern = /\[\[STAGE\]\]|<<<STAGE>>>/gi
+
+/**
+ * Splits streamed text into visible text and marker hits while tolerating
+ * markers that are split across chunk boundaries.
+ */
+export class ThinkingMarkerReader {
+  private buffer = ""
+  private pendingLineBreak = false
+  private emitted = false
+
+  push(chunk: string): { text: string; markers: number } {
+    this.buffer += chunk
+    const hold = pendingMarkerLength(this.buffer)
+    const emit = hold > 0 ? this.buffer.slice(0, this.buffer.length - hold) : this.buffer
+    this.buffer = hold > 0 ? this.buffer.slice(this.buffer.length - hold) : ""
+    return this.consume(emit)
+  }
+
+  flush(): { text: string; markers: number } {
+    const rest = this.buffer
+    this.buffer = ""
+    this.pendingLineBreak = false
+    return this.consume(rest)
+  }
+
+  private consume(value: string) {
+    // A marker owns its whole line: the line break that opened it and the one
+    // that closes it go away with it, and a single newline is kept in their
+    // place so the surrounding paragraphs stay separated.
+    let source = value
+    if (this.pendingLineBreak) {
+      const lead = /^(?:\r?\n)+/.exec(source)
+      if (lead) source = source.slice(lead[0].length)
+      if (source.trim()) this.pendingLineBreak = false
+    }
+    let index = 0
+    let text = ""
+    let markers = 0
+    const pattern = new RegExp(markerPattern.source, markerPattern.flags)
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(source))) {
+      text += source.slice(index, match.index)
+      text = text.replace(/(?:\r?\n)+$/, "")
+      markers++
+      index = match.index + match[0].length
+      const trailing = /^\r?\n/.exec(source.slice(index))
+      if (trailing) index += trailing[0].length
+      else this.pendingLineBreak = true
+      if (this.emitted || text.trim()) text += "\n"
+    }
+    text += source.slice(index)
+    if (text.trim()) this.emitted = true
+    if (markers > 0 && !text.trim()) this.pendingLineBreak = true
+    return { text, markers }
+  }
+}
+
+export function stripStageMarkers(value: string) {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim().toUpperCase()
+      return trimmed !== stageMarker && trimmed !== "<<<STAGE>>>"
+    })
+    .join("\n")
+    .replace(/\[\[STAGE\]\]|<<<STAGE>>>/gi, "")
+    .replace(/^(?:\r?\n)+/, "")
+    .replace(/(?:\r?\n)+$/, "")
+}
+
+function pendingMarkerLength(value: string) {
+  const limit = Math.min(value.length, Math.max(...markerCandidates.map((item) => item.length)))
+  for (let length = limit; length > 0; length--) {
+    const tail = value.slice(value.length - length).toUpperCase()
+    if (markerCandidates.some((item) => item.toUpperCase().startsWith(tail))) return length
+  }
+  return 0
+}
+
 export class ThinkingSummaryStore {
   private readonly summaries: ThinkingSummary[]
   private version: number
 
   constructor(snapshot?: ThinkingSummarySnapshot) {
-    this.summaries = snapshot?.summaries ? structuredClone(snapshot.summaries) : []
-    this.version = snapshot?.version ?? 0
+    this.summaries = snapshot?.summaries ? structuredClone(snapshot.summaries).map((summary) => summary.status === "pending" ? { ...summary, status: "degraded" as const } : summary) : []
+    this.version = (snapshot?.version ?? 0) + (snapshot?.summaries.some((summary) => summary.status === "pending") ? 1 : 0)
   }
 
   snapshot(): ThinkingSummarySnapshot {
     return structuredClone({ version: this.version, summaries: this.summaries })
   }
 
-  add(input: ThinkingSummaryInput & { id?: string }): ThinkingSummary {
+  add(input: ThinkingSummaryInput & { id?: string; runID?: string; stageID?: string; status?: ThinkingSummary["status"] }): ThinkingSummary {
     const now = Date.now()
     const summary: ThinkingSummary = {
       id: input.id ?? crypto.randomUUID(),
@@ -42,6 +139,7 @@ export class ThinkingSummaryStore {
       caution: optionalSummaryText(input.caution ?? "", "caution", 300),
       createdAt: now,
       updatedAt: now,
+      ...(input.runID ? { runID: input.runID, stageID: input.stageID, status: input.status } : {}),
     }
     this.summaries.push(summary)
     this.version++
@@ -58,10 +156,19 @@ export class ThinkingSummaryStore {
       reason: input.reason === undefined ? current.reason : requireSummaryText(input.reason, "reason", 300),
       caution: input.caution === undefined ? current.caution : optionalSummaryText(input.caution, "caution", 300),
       updatedAt: Date.now(),
+      ...(current.status ? { status: "ready" as const } : {}),
     }
     this.summaries[index] = next
     this.version++
     return structuredClone(next)
+  }
+
+  complete(id: string, input: ThinkingSummaryInput, degraded: boolean) {
+    const current = this.summaries.find((summary) => summary.id === id)
+    if (current?.status !== "pending") return false
+    this.update(id, input)
+    this.summaries.find((summary) => summary.id === id)!.status = degraded ? "degraded" : "ready"
+    return true
   }
 
   remove(id: string): { removed: ThinkingSummary; summaries: ThinkingSummary[] } {
