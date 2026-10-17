@@ -79,4 +79,3 @@ export function shouldApplyThinkingSnapshot(
   if (current.sessionID !== incoming.sessionID) return false
   return incoming.version > current.version
 }
-
